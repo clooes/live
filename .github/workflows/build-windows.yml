@@ -13,6 +13,11 @@ permissions:
 jobs:
   build-windows:
     runs-on: windows-latest
+    # 新版 CMake(runner 为 4.x)移除了对 cmake_minimum_required < 3.5 的兼容，
+    # audiopus_sys/opus 等老 -sys crate 的 vendored CMakeLists 会 configure 失败。
+    # 用 CMake 官方给的绕过：强制最低 policy 版本 3.5（对所有 CMake 构建生效）。
+    env:
+      CMAKE_POLICY_VERSION_MINIMUM: "3.5"
     steps:
       - uses: actions/checkout@v4
 
