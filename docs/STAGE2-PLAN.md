@@ -55,6 +55,18 @@
 - 方案：`config.json` 加 `ports { web, webrtc, rtmp }`（缺省用当前默认）；`main.rs` 读 config；前端 WHEP 端口从 `/api/config` 拿（不再硬编码）。
 - 文件：`config.rs`、`main.rs`、`web.rs` + 前端 `whep.ts`/`api.ts` ｜ 难度：低-中
 
+### R9 下载片段加图片水印（新需求 · 待排期）
+- 目标：下载的视频片段叠加本地图片水印（防扩散/标识来源）。**仅作用于下载片段**，直播播放与整场回放不动（D10）。
+- 方案：切片这一步用 ffmpeg `overlay` 滤镜叠图。示意滤镜链：
+  `[1]scale=iw*<scale>:-1,format=rgba,colorchannelmixer=aa=<opacity>[wm];[0][wm]overlay=<pos>`。
+  现有 `quality_args` 的 `-vf`（单输入）需改为 `-filter_complex`（片段 + 水印图两输入），把 `scale`(清晰度) 与 `overlay`(水印) 合进同一链；`overlay` 坐标用 `W-w`/`H-h` 表达式自适应各清晰度分辨率。
+- 关键影响：**original 不再能 `-c copy`**——水印须逐帧绘制 → 全清晰度都重编码（D8=B）。牺牲原画秒级直拷，换全档带水印一致性。
+- 配置（config.json 新增，本地路径 D9）：
+  `watermark { enabled, image(本地路径，复用 data_dir 的 绝对/~//相对二进制目录 解析), position(br/bl/tr/tl/center), opacity(0~1), scale(相对视频宽) }`；只填 image+enabled 也能跑，其余给默认。
+- 缓存失效：现按 `clip_<job>_<quality>.mp4` 缓存，需让 key 能区分「有/无水印」及「换图/换位置」——文件名带水印配置短 hash 或水印图 mtime，否则改配置仍下到旧文件。
+- 容错：图片不存在/路径错 → 回退不加水印正常出片 + 记 user_ops 日志，勿让下载失败。
+- 文件：`config.rs`(watermark 配置)、`clip.rs`(filter_complex + 缓存 key)、`web.rs`(prepare 传水印上下文，可选) ｜ 难度：中
+
 ---
 
 ## 关键决策（已定稿）
@@ -67,6 +79,9 @@
 | D5 | R7 多用户隔离 | ⏸ 本阶段先不做，推迟 |
 | D6 | R2 删管理页后改 room/清晰度入口 | ✅ 纯看 config.json（彻底删管理页，无改配置 UI；改后重启生效） |
 | D7 | R3 回放展示形态 | ✅ 单页内弹窗（复用 R6 弹窗风格，独立 HLS VOD 播放器） |
+| D8 | R9 水印作用范围（original 是否重编码） | ✅ B 全清晰度都加水印（original 也重编码，放弃秒级直拷） |
+| D9 | R9 水印图片来源 | ✅ 本地图片路径（复用 data_dir 路径解析；不用 URL） |
+| D10 | R9 水印作用对象 | ✅ 仅下载片段（直播播放/整场回放不加） |
 
 > 实现补充：
 > - R8 端口属**启动期配置**，改 config.json 的 ports 后**需重启**（不像 room/清晰度 SSE 热更新）。
@@ -98,6 +113,9 @@
 ### 批次 5 · 多用户隔离 ⏸ 本阶段推迟
 - [ ] ~~R7 client_id 身份 + mark/jobs per-client + 状态恢复 + 片段隔离~~（推迟到下一阶段）
 
+### 批次 6 · 下载水印（R9 · 待排期，决策 D8~D10 已定）
+- [ ] R9 下载片段加图片水印（config.watermark + clip.rs filter_complex overlay + 缓存 key 含水印 + 容错回退）
+
 > 第二阶段除 R7（推迟）外全部完成：批次1 `40690dd`、批次2 `0928b5d`、批次3 `6481113`、批次4（本次）。
 
 ---
@@ -108,3 +126,4 @@
 - **R4** 重编码引入 CPU 开销（内置 ffmpeg 已含 libx264）。
 - **R2** 删页面要「合并功能」而非「丢功能」——回放/下载并入观看页，别丢。
 - **R3** 先确认现象再改，避免误判。
+- **R9** 开水印后 original 失去 `-c copy` 秒级优势（全档重编码，CPU 上升）；缓存 key 必须含水印状态，否则改配置仍下到旧文件；水印图缺失要回退不加而非报错。
