@@ -9,8 +9,9 @@
 use std::convert::Infallible;
 
 use axum::{
-    extract::{Path, State},
-    http::{header, StatusCode, Uri},
+    extract::{Path, Request, State},
+    http::{header, Method, StatusCode, Uri},
+    middleware::{self, Next},
     response::{
         sse::{Event, KeepAlive, Sse},
         IntoResponse, Response,
@@ -47,14 +48,21 @@ pub fn router(state: WebState) -> Router {
     Router::new()
         .route("/api/config", get(get_config).post(post_config))
         .route("/api/config/stream", get(config_stream))
+        .route("/api/lan-ip", get(lan_ip))
         // 录制/切片
         .route("/api/clip/start", post(clip_start))
         .route("/api/clip/end", post(clip_end))
         .route("/api/clip/status/:id", get(clip_status))
         .route("/api/clips", get(list_clips))
         .route("/api/recordings", get(list_recordings))
-        // 切片下载 / 整场 HLS 回放（ServeDir 自带 Range 支持）
-        .nest_service("/clips", ServeDir::new(clip::clips_dir()))
+        // 切片下载（ServeDir 自带 Range 支持）+ 下载埋点（user_ops 日志）
+        .nest(
+            "/clips",
+            Router::new()
+                .fallback_service(ServeDir::new(clip::clips_dir()))
+                .layer(middleware::from_fn(log_clip_download)),
+        )
+        // 整场 HLS 回放
         .nest_service("/recordings", ServeDir::new(config::data_root().join("recordings")))
         .fallback(static_handler)
         .layer(CorsLayer::permissive())
@@ -63,6 +71,14 @@ pub fn router(state: WebState) -> Router {
 
 async fn get_config(State(st): State<WebState>) -> Json<RelayConfig> {
     Json(st.cfg.read().await.clone())
+}
+
+/// 内网分享（R6）：返回本机内网 IP + web 端口，前端据此生成二维码 http://<ip>:<port>。
+/// 取不到内网 IP（无网卡/异常）时 ip 为 null，前端回退用当前主机名。
+async fn lan_ip(State(st): State<WebState>) -> Json<serde_json::Value> {
+    let ip = local_ip_address::local_ip().ok().map(|a| a.to_string());
+    let web_port = st.cfg.read().await.ports.web;
+    Json(json!({ "ip": ip, "web_port": web_port }))
 }
 
 async fn post_config(
@@ -92,7 +108,7 @@ async fn clip_start(State(st): State<WebState>) -> Result<Json<serde_json::Value
         return Err((StatusCode::CONFLICT, "当前没有正在直播的录制".into()));
     };
     let mark = ClipMark { session_id: sess.id.clone(), start_ms: now_ms() };
-    log::info!("标记切片起点 session={} start_ms={}", mark.session_id, mark.start_ms);
+    log::info!(target: "user_ops", "开始录制 session={} start_ms={}", mark.session_id, mark.start_ms);
     let resp = json!({ "ok": true, "session_id": mark.session_id, "start_ms": mark.start_ms });
     s.mark = Some(mark);
     Ok(Json(resp))
@@ -124,6 +140,11 @@ async fn clip_end(State(st): State<WebState>) -> Result<Json<ClipJob>, (StatusCo
         s.jobs.insert(0, job.clone()); // 最新在前
         job
     };
+    log::info!(
+        target: "user_ops",
+        "结束录制 session={} 区间=[{}, {}] 建切片 job={}",
+        job.session_id, job.start_ms, job.end_ms, job.id
+    );
     // 异步执行切片
     tokio::spawn(clip::run_job(st.rec.clone(), job.id.clone()));
     Ok(Json(job))
@@ -189,6 +210,18 @@ fn json_event(cfg: &RelayConfig) -> Event {
     Event::default()
         .json_data(cfg)
         .unwrap_or_else(|_| Event::default().data("{}"))
+}
+
+/// 下载埋点：记录对切片文件（.mp4）的 GET 到 user_ops 日志。
+/// 挂在 /clips 子路由上，只影响切片下载，不影响其他静态资源/回放。
+async fn log_clip_download(req: Request, next: Next) -> Response {
+    if req.method() == Method::GET {
+        let path = req.uri().path();
+        if path.ends_with(".mp4") {
+            log::info!(target: "user_ops", "下载切片 /clips{path}");
+        }
+    }
+    next.run(req).await
 }
 
 /// 静态资源：命中则返回；未命中（SPA 前端路由）回退 index.html。

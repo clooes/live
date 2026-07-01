@@ -18,6 +18,13 @@ export interface RelayConfig {
   ports: Ports
 }
 
+/// 内网分享地址（R6）：本机内网 IP + web 端口，前端据此生成二维码。ip 可能为 null（探测失败）。
+export async function getLanIp(): Promise<{ ip: string | null; web_port: number }> {
+  const r = await fetch('/api/lan-ip')
+  if (!r.ok) throw new Error('读取内网地址失败 ' + r.status)
+  return r.json()
+}
+
 export async function getConfig(): Promise<RelayConfig> {
   const r = await fetch('/api/config')
   if (!r.ok) throw new Error('读取配置失败 ' + r.status)

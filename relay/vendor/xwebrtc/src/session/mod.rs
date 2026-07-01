@@ -422,6 +422,7 @@ impl WebRTCServerSession {
                                     }
                                 }
                                 RTCPeerConnectionState::Closed => {
+                                    log::info!(target: "viewers", "离开直播间 room={stream_name_out} app={app_name_out}");
                                     if let Err(err) = Self::unsubscribe_whep(
                                         app_name_out,
                                         stream_name_out,
@@ -449,7 +450,7 @@ impl WebRTCServerSession {
                     .insert("Content-Type".to_string(), "application/sdp".to_string());
                 response.headers.insert("Location".to_string(), path);
                 response.body = Some(session_description.sdp);
-                log::info!("before whep 1");
+                log::info!(target: "viewers", "进入直播间 room={stream_name} app={app_name}");
                 response
             }
             Err(err) => {

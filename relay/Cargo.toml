@@ -6,7 +6,11 @@ edition = "2021"
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 log = "0.4"
-env_logger = "0.11"
+# 分类文件日志（R5-b）：现有 log:: 宏经 tracing-subscriber 的 tracing-log 桥接进 tracing，
+# 按 log target 路由到 system/user-ops/viewers 三个滚动文件 + 保留控制台。
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
 anyhow = "1"
 
 # xiu 纯 Rust 媒体内核（RTMP 接收 + WHEP 输出 + 媒体路由）
@@ -22,6 +26,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rust-embed = { version = "8", features = ["mime-guess"] }
 mime_guess = "2"
+# 内网分享二维码（R6）：探测本机内网 IP，供 /api/lan-ip 下发
+local-ip-address = "0.6"
 tokio-stream = { version = "0.1", features = ["sync"] }
 futures = "0.3"
 chrono = "0.4"

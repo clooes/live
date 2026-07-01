@@ -10,6 +10,7 @@ mod banner;
 mod clip;
 mod config;
 mod ffmpeg;
+mod logging;
 mod record;
 mod web;
 
@@ -25,18 +26,19 @@ const GOP_NUM: usize = 1;
 
 #[tokio::main]
 async fn main() {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
-
     // 加载/生成配置（config.json）+ 配置变更广播通道
     let loaded = config::load();
     // 监听地址由 config.ports 决定（端口被占用时改 config.json 即可，无需改代码）
     let rtmp_addr = format!("0.0.0.0:{}", loaded.ports.rtmp);
     let whep_addr = format!("0.0.0.0:{}", loaded.ports.webrtc);
     let web_addr = format!("0.0.0.0:{}", loaded.ports.web);
-    // 启动横幅：ASCII art + 端口/地址表（先于各服务日志打印）
+    // 启动横幅：ASCII art + 端口/地址表（先于各服务日志打印，用 println 不依赖 logger）
     banner::print(&loaded.ports);
     // 确定数据根目录（录制/切片），以二进制目录为基准或 config.data_dir，不随 CWD 变化
     let data_root = config::init_data_root(&loaded);
+    // 装日志：控制台 + data_root/logs 下 system/user-ops/viewers 三个滚动文件。
+    // _guards 必须存活到进程结束（drop 会丢未刷盘日志），故绑定到 main 局部变量。
+    let _log_guards = logging::init(&data_root);
     log::info!("数据目录：{}（录制/切片存放于此）", data_root.display());
     let cfg = Arc::new(RwLock::new(loaded));
     let (cfg_tx, _) = tokio::sync::broadcast::channel(16);

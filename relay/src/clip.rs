@@ -197,7 +197,7 @@ async fn finish(rec: &SharedRec, job_id: &str, result: anyhow::Result<()>) {
     match result {
         Ok(()) => {
             job.status = "done".into();
-            log::info!("切片完成 job={job_id} -> {:?} ({:?})", job.file, job.size);
+            log::info!(target: "user_ops", "切片完成可下载 job={job_id} file={:?} size={:?}", job.file, job.size);
         }
         Err(e) => {
             job.status = "error".into();

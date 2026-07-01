@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
+import { QRCodeSVG } from 'qrcode.react'
 import { useWhep } from '../whep'
-import { clipStart, clipEnd, clipStatus, clipUrl, type ClipJob, type RelayConfig } from '../api'
+import { clipStart, clipEnd, clipStatus, clipUrl, getLanIp, type ClipJob, type RelayConfig } from '../api'
 
 export function Viewer() {
   const videoRef = useRef<HTMLVideoElement>(null)
@@ -38,9 +39,51 @@ export function Viewer() {
           <span className="sync" title="配置实时同步">{synced ? ' · 已同步' : ' · 离线'}</span>
         </span>
         <button onClick={reconnect}>重连</button>
+        <ShareButton />
       </div>
       <RecordBar live={live} />
     </div>
+  )
+}
+
+/// 分享按钮：点开弹二维码，手机扫码进入本直播页（http://<内网IP>:<web端口>）。
+function ShareButton() {
+  const [open, setOpen] = useState(false)
+  const [url, setUrl] = useState('')
+  const [err, setErr] = useState('')
+
+  async function onOpen() {
+    setErr(''); setOpen(true)
+    try {
+      const { ip, web_port } = await getLanIp()
+      // 探测失败则回退当前浏览器地址（跨设备时可能是 localhost，仅本机可用）
+      setUrl(ip ? `http://${ip}:${web_port}` : `${location.protocol}//${location.host}`)
+    } catch (e) {
+      setErr(String(e))
+      setUrl(`${location.protocol}//${location.host}`)
+    }
+  }
+
+  return (
+    <>
+      <button onClick={onOpen}>📱 分享</button>
+      {open && (
+        <div className="modal-mask" onClick={() => setOpen(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <h3>扫码进入直播</h3>
+            {url && (
+              <div className="qr-box">
+                <QRCodeSVG value={url} size={200} includeMargin />
+              </div>
+            )}
+            <p className="qr-url">{url || '获取地址中…'}</p>
+            {err && <p className="rec-err">内网 IP 探测失败，已回退当前地址</p>}
+            <p className="qr-tip">手机需与本机在同一局域网 / Wi-Fi</p>
+            <button onClick={() => setOpen(false)}>关闭</button>
+          </div>
+        </div>
+      )}
+    </>
   )
 }
 
