@@ -65,8 +65,8 @@
 | D3 | R4 下载时选清晰度、用重编码 | ✅ 是 |
 | D4 | R5 日志分文件 vs 单文件带标签 | ✅ 分文件（system/user-ops/viewers） |
 | D5 | R7 多用户隔离 | ⏸ 本阶段先不做，推迟 |
-| D6 | R2 删管理页后改 room/清晰度入口 | ⏳ 待确认（config.json+重启 vs 单页轻量设置弹窗） |
-| D7 | R3 回放展示形态 | ⏳ 待确认（单页内弹窗/抽屉，复用 R6 弹窗风格） |
+| D6 | R2 删管理页后改 room/清晰度入口 | ✅ 纯看 config.json（彻底删管理页，无改配置 UI；改后重启生效） |
+| D7 | R3 回放展示形态 | ✅ 单页内弹窗（复用 R6 弹窗风格，独立 HLS VOD 播放器） |
 
 > 实现补充：
 > - R8 端口属**启动期配置**，改 config.json 的 ports 后**需重启**（不像 room/清晰度 SSE 热更新）。
@@ -86,11 +86,9 @@
 - [x] R5-b 文件日志（tracing + 按天滚动，按 log target 分类 system/user-ops/viewers → data_root/logs，控制台保留全量）
 - [x] R6 二维码弹窗（/api/lan-ip 返回内网 IP + web 端口；前端 qrcode.react 分享按钮弹窗）
 
-### 批次 3 · 单页面重构 + 回放（进行中）
-- [ ] R2 砍管理/录制页 → 单页（录制条+片段并入观看页，去路由）
-- [ ] R3 回放修正（只回放已结束 VOD / 播放器 VOD 模式）— 依赖 D2
-- **待确认 D6**：删管理页后，改 room/清晰度的入口去留 —— 纯 config.json+重启，还是单页保留轻量设置弹窗？
-- **待确认 D7**：回放放单页内弹窗/抽屉（复用 R6 弹窗风格）确认？
+### 批次 3 · 单页面重构 + 回放 ✅ 已完成
+- [x] R2 砍管理/录制页 → 单页（录制条+片段/回放并入观看页，去 hash 路由；删 Admin/Recordings.tsx；后端删 POST /api/config 写接口，配置纯看 config.json — D6）
+- [x] R3 回放修正（Library 只列已结束场次 `!r.live`，回放走单页内弹窗独立 HLS VOD 播放器，与直播 WHEP video 完全解耦；根因=旧代码对 live playlist 追尾、观感等同直播 — D2/D7）
 
 ### 批次 4 · 录制体验
 - [ ] R4 下载时选清晰度（clip quality_args 重编码 + API + UI）

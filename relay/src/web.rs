@@ -46,7 +46,8 @@ struct Assets;
 
 pub fn router(state: WebState) -> Router {
     Router::new()
-        .route("/api/config", get(get_config).post(post_config))
+        // 配置纯看 config.json（D6：管理页已删，无写接口）；GET + SSE 供前端读取/下发 room/端口
+        .route("/api/config", get(get_config))
         .route("/api/config/stream", get(config_stream))
         .route("/api/lan-ip", get(lan_ip))
         // 录制/切片
@@ -79,24 +80,6 @@ async fn lan_ip(State(st): State<WebState>) -> Json<serde_json::Value> {
     let ip = local_ip_address::local_ip().ok().map(|a| a.to_string());
     let web_port = st.cfg.read().await.ports.web;
     Json(json!({ "ip": ip, "web_port": web_port }))
-}
-
-async fn post_config(
-    State(st): State<WebState>,
-    Json(new_cfg): Json<RelayConfig>,
-) -> Result<Json<RelayConfig>, (StatusCode, String)> {
-    if !new_cfg.qualities.iter().any(|q| q.name == new_cfg.default_quality) {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "default_quality 不在 qualities 列表中".into(),
-        ));
-    }
-    config::save(&new_cfg).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    *st.cfg.write().await = new_cfg.clone();
-    // 广播给所有在线观看端（无订阅者时 send 会 Err，忽略即可）
-    let _ = st.tx.send(new_cfg.clone());
-    log::info!("配置已更新、持久化并广播（当前订阅端 {}）", st.tx.receiver_count());
-    Ok(Json(new_cfg))
 }
 
 // ---------- 录制 / 切片 ----------

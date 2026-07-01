@@ -1,7 +1,11 @@
 import { useEffect, useRef, useState } from 'react'
 import { QRCodeSVG } from 'qrcode.react'
 import { useWhep } from '../whep'
-import { clipStart, clipEnd, clipStatus, clipUrl, getLanIp, type ClipJob, type RelayConfig } from '../api'
+import {
+  clipStart, clipEnd, clipStatus, clipUrl, getLanIp,
+  listClips, listRecordings,
+  type ClipJob, type Recording, type RelayConfig,
+} from '../api'
 
 export function Viewer() {
   const videoRef = useRef<HTMLVideoElement>(null)
@@ -42,6 +46,7 @@ export function Viewer() {
         <ShareButton />
       </div>
       <RecordBar live={live} />
+      <Library />
     </div>
   )
 }
@@ -150,7 +155,137 @@ function RecordBar({ live }: { live: boolean }) {
         </span>
       )}
       {err && <span className="rec-err">{err}</span>}
-      <a className="rec-link" href="#/recordings">全部录制 →</a>
     </div>
   )
+}
+
+function fmtTime(ms: number): string {
+  return new Date(ms).toLocaleString()
+}
+function fmtDur(a: number, b: number | null): string {
+  if (!b) return '进行中'
+  const s = Math.round((b - a) / 1000)
+  const m = Math.floor(s / 60)
+  return m > 0 ? `${m}分${s % 60}秒` : `${s}秒`
+}
+
+/// 片段/录制库（并入观看页）：上「我的片段」下载，下「整场录制」回放（弹窗 VOD）。
+/// 每 3s 刷新，切片进行中能自动更新进度。
+function Library() {
+  const [clips, setClips] = useState<ClipJob[]>([])
+  const [recs, setRecs] = useState<Recording[]>([])
+  const [replay, setReplay] = useState<Recording | null>(null) // 正在回放的场次（null=关闭弹窗）
+
+  async function refresh() {
+    try {
+      const [c, r] = await Promise.all([listClips(), listRecordings()])
+      setClips(c); setRecs(r)
+    } catch { /* 忽略 */ }
+  }
+  useEffect(() => {
+    refresh()
+    const t = setInterval(refresh, 3000)
+    return () => clearInterval(t)
+  }, [])
+
+  // R3：回放只列**已结束**（含 ENDLIST 的 VOD）的场次；直播中的场次不给回放入口，
+  // 避免对 live playlist 追最新帧、观感等同直播（这正是「回放却是直播」的根因）。
+  const ended = recs.filter((r) => !r.live)
+  const liveCount = recs.length - ended.length
+
+  return (
+    <div className="library">
+      <h2>片段切片</h2>
+      {clips.length === 0 && <p className="muted">暂无切片。上方点「开始/结束录制」生成片段。</p>}
+      {clips.length > 0 && (
+        <table className="qtable">
+          <thead>
+            <tr><th>时间</th><th>时长</th><th>状态</th><th>操作</th></tr>
+          </thead>
+          <tbody>
+            {clips.map((c) => (
+              <tr key={c.id}>
+                <td>{fmtTime(c.created_at_ms)}</td>
+                <td>{Math.round((c.end_ms - c.start_ms) / 1000)}s</td>
+                <td>
+                  {c.status === 'processing' && '切片中…'}
+                  {c.status === 'done' && <span className="ok">完成 {c.size}</span>}
+                  {c.status === 'error' && <span className="rec-err" title={c.error || ''}>失败</span>}
+                </td>
+                <td>{c.status === 'done' && c.file && <a href={clipUrl(c.file)} download>下载</a>}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+
+      <h2>整场录制</h2>
+      {ended.length === 0 && (
+        <p className="muted">
+          暂无可回放录制。{liveCount > 0 ? '当前直播结束后此场即可回放。' : '直播开始后自动全程录制。'}
+        </p>
+      )}
+      <ul className="rec-list">
+        {ended.map((r) => (
+          <li key={r.id}>
+            <div className="rec-row">
+              <span className="dot" />
+              <span>{fmtTime(r.started_at_ms)}</span>
+              <span className="muted">时长 {fmtDur(r.started_at_ms, r.ended_at_ms)}</span>
+              <button onClick={() => setReplay(r)}>▶ 回放</button>
+            </div>
+          </li>
+        ))}
+      </ul>
+
+      {replay && <ReplayModal rec={replay} onClose={() => setReplay(null)} />}
+    </div>
+  )
+}
+
+/// 回放弹窗（D7）：独立 HLS VOD 播放器，与直播 WHEP 的 <video> 完全解耦。
+function ReplayModal({ rec, onClose }: { rec: Recording; onClose: () => void }) {
+  return (
+    <div className="modal-mask" onClick={onClose}>
+      <div className="modal modal-wide" onClick={(e) => e.stopPropagation()}>
+        <h3>回放 · {fmtTime(rec.started_at_ms)}</h3>
+        <HlsPlayer src={rec.playlist} />
+        <button onClick={onClose}>关闭</button>
+      </div>
+    </div>
+  )
+}
+
+/// HLS 回放：Safari 原生支持 m3u8；其它浏览器动态加载 hls.js。播的是录制 VOD，非直播流。
+function HlsPlayer({ src }: { src: string }) {
+  const ref = useRef<HTMLVideoElement>(null)
+
+  useEffect(() => {
+    const video = ref.current
+    if (!video) return
+    // Safari / iOS 原生 HLS
+    if (video.canPlayType('application/vnd.apple.mpegurl')) {
+      video.src = src
+      return
+    }
+    // 其它浏览器：动态 import hls.js（按需，不进主包）
+    let hls: any
+    let cancelled = false
+    import('hls.js').then(({ default: Hls }) => {
+      if (cancelled) return
+      if (Hls.isSupported()) {
+        hls = new Hls()
+        hls.loadSource(src)
+        hls.attachMedia(video)
+      } else {
+        video.src = src // 兜底
+      }
+    })
+    return () => {
+      cancelled = true
+      if (hls) hls.destroy()
+    }
+  }, [src])
+
+  return <video ref={ref} controls playsInline autoPlay className="player replay" />
 }

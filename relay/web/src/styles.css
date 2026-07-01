@@ -94,3 +94,11 @@ button.primary:disabled { opacity: .6; cursor: default; }
 .qr-box { background: #fff; padding: 12px; border-radius: 8px; display: inline-block; }
 .qr-url { margin: 14px 0 4px; font-size: 13px; color: #3b82f6; word-break: break-all; }
 .qr-tip { margin: 6px 0 16px; font-size: 12px; color: #6b7280; }
+
+/* 片段/录制库（并入观看页） */
+.library { margin-top: 26px; padding-top: 20px; border-top: 1px solid #23252b; }
+.library h2 { margin: 18px 0 12px; font-size: 16px; }
+.library h2:first-child { margin-top: 0; }
+/* 回放弹窗加宽以容纳视频 */
+.modal-wide { max-width: 720px; width: 90vw; }
+.modal-wide .player.replay { width: 100%; aspect-ratio: 16 / 9; background: #000; margin-bottom: 14px; }
