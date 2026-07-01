@@ -8,8 +8,9 @@ export interface WhepApi {
 }
 
 // WHEP 播放：createOffer → POST /whep → setRemoteDescription；断流自动重连。
-// 复用自 frontend/src/hooks/usePlayer.ts 的 WebRTC 分支，去掉 FLV，信令改指 relay :8900。
-export function useWhep(videoRef: RefObject<HTMLVideoElement>, room: string): WhepApi {
+// 复用自 frontend/src/hooks/usePlayer.ts 的 WebRTC 分支，去掉 FLV，信令走 relay webrtc 端口。
+// webrtcPort 由 /api/config 下发（端口可配，见 R8）；为 0 时表示配置未就绪，暂不连接。
+export function useWhep(videoRef: RefObject<HTMLVideoElement>, room: string, webrtcPort: number): WhepApi {
   const [status, setStatus] = useState('未连接')
   const [live, setLive] = useState(false)
   const pcRef = useRef<RTCPeerConnection | null>(null)
@@ -25,7 +26,7 @@ export function useWhep(videoRef: RefObject<HTMLVideoElement>, room: string): Wh
   }, [videoRef])
 
   const play = useCallback(async () => {
-    if (!room) return
+    if (!room || !webrtcPort) return
     cleanup()
     setLive(false)
     setStatus('WebRTC 连接中…')
@@ -37,6 +38,8 @@ export function useWhep(videoRef: RefObject<HTMLVideoElement>, room: string): Wh
       pc.ontrack = (e) => {
         if (e.streams && e.streams[0] && videoRef.current) {
           videoRef.current.srcObject = e.streams[0]
+          // R1：流一就绪即显式播放（muted 下浏览器允许自动播），避免需手动点
+          videoRef.current.play().catch(() => {})
         }
       }
       pc.onconnectionstatechange = () => {
@@ -48,7 +51,7 @@ export function useWhep(videoRef: RefObject<HTMLVideoElement>, room: string): Wh
       }
       const offer = await pc.createOffer()
       await pc.setLocalDescription(offer)
-      const resp = await fetch(whepUrl(room), {
+      const resp = await fetch(whepUrl(room, webrtcPort), {
         method: 'POST',
         headers: { 'Content-Type': 'application/sdp' },
         body: offer.sdp,
@@ -60,7 +63,7 @@ export function useWhep(videoRef: RefObject<HTMLVideoElement>, room: string): Wh
       setStatus('连接失败：' + (err as Error).message + '（等待推流…）')
       if (!stoppedRef.current) setTimeout(play, 3000)
     }
-  }, [cleanup, room, videoRef])
+  }, [cleanup, room, videoRef, webrtcPort])
 
   useEffect(() => {
     stoppedRef.current = false
@@ -74,7 +77,7 @@ export function useWhep(videoRef: RefObject<HTMLVideoElement>, room: string): Wh
       cleanup()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [room])
+  }, [room, webrtcPort])
 
   return { status, live, reconnect: play }
 }

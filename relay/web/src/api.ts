@@ -5,10 +5,17 @@ export interface Quality {
   bitrate_kbps: number
 }
 
+export interface Ports {
+  web: number
+  webrtc: number
+  rtmp: number
+}
+
 export interface RelayConfig {
   room: string
   qualities: Quality[]
   default_quality: string
+  ports: Ports
 }
 
 export async function getConfig(): Promise<RelayConfig> {
@@ -27,9 +34,10 @@ export async function saveConfig(cfg: RelayConfig): Promise<RelayConfig> {
   return r.json()
 }
 
-/// WHEP 播放地址：页面从 :8000 提供，媒体走 :8900。跨设备访问自动跟随主机名。
-export function whepUrl(room: string): string {
-  return `http://${location.hostname}:8900/whep?app=live&stream=${encodeURIComponent(room)}`
+/// WHEP 播放地址：页面从 web 端口提供，媒体走 webrtc 端口（由 /api/config 下发）。
+/// 跨设备访问自动跟随主机名；端口改配置后前端自动跟随，无需改代码。
+export function whepUrl(room: string, webrtcPort: number): string {
+  return `http://${location.hostname}:${webrtcPort}/whep?app=live&stream=${encodeURIComponent(room)}`
 }
 
 // ---------- 录制 / 切片 ----------

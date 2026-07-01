@@ -88,12 +88,12 @@ export function Admin() {
         <h3>推流指引（OBS WHIP）</h3>
         <ol>
           <li>OBS → 设置 → 直播：服务选 <b>WHIP</b>，Bearer 留空</li>
-          <li>服务器填：<code>{`http://${location.hostname}:8900/whip?app=live&stream=${cfg.room}`}</code></li>
+          <li>服务器填：<code>{`http://${location.hostname}:${cfg.ports?.webrtc ?? 8900}/whip?app=live&stream=${cfg.room}`}</code></li>
           <li>输出用 x264，关键帧间隔 <b>1s</b>、profile <b>baseline</b>、附加 <code>repeat-headers=1</code></li>
           <li>推荐码率参考上表默认档：
             <b>{cfg.qualities.find((q) => q.name === cfg.default_quality)?.bitrate_kbps ?? '-'} kbps</b></li>
         </ol>
-        <p>观看地址（WHEP）：<code>{whepUrl(cfg.room)}</code></p>
+        <p>观看地址（WHEP）：<code>{whepUrl(cfg.room, cfg.ports?.webrtc ?? 8900)}</code></p>
       </div>
     </div>
   )

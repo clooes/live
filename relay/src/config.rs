@@ -14,6 +14,24 @@ pub struct Quality {
     pub bitrate_kbps: u32,  // 建议码率
 }
 
+/// 监听端口配置。端口被占用时可在 config.json 改此三项（改后重启生效）。
+/// 前端 WHEP 播放端口由 /api/config 下发，改端口后前端自动跟随，无需另改代码。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Ports {
+    /// 内网页面 + API（axum）
+    pub web: u16,
+    /// WHIP 推流 + WHEP 播放（WebRTC 信令，同端口）
+    pub webrtc: u16,
+    /// RTMP 接收（可选保留）
+    pub rtmp: u16,
+}
+
+impl Default for Ports {
+    fn default() -> Self {
+        Self { web: 8000, webrtc: 8900, rtmp: 1935 }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RelayConfig {
     /// 直播间/流名（对应 WHIP/WHEP 的 stream 参数）
@@ -22,6 +40,10 @@ pub struct RelayConfig {
     pub qualities: Vec<Quality>,
     /// 默认清晰度名（须存在于 qualities 中）
     pub default_quality: String,
+    /// 监听端口（缺省用内置默认：web 8000 / webrtc 8900 / rtmp 1935）。
+    /// 属启动期配置：改后需重启进程生效（不像 room/清晰度那样 SSE 热更新）。
+    #[serde(default)]
+    pub ports: Ports,
     /// 数据目录（录制/切片存放）。留空 = 二进制同目录下的 `data/`。
     /// 绝对路径按原样使用；`~/…` 相对家目录；其余相对二进制所在目录。改后需重启生效。
     #[serde(default)]
@@ -38,6 +60,7 @@ impl Default for RelayConfig {
                 Quality { name: "480p".into(), bitrate_kbps: 1000 },
             ],
             default_quality: "original".into(),
+            ports: Ports::default(),
             data_dir: None,
         }
     }

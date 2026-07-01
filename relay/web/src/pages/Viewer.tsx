@@ -5,8 +5,9 @@ import { clipStart, clipEnd, clipStatus, clipUrl, type ClipJob, type RelayConfig
 export function Viewer() {
   const videoRef = useRef<HTMLVideoElement>(null)
   const [room, setRoom] = useState('')
+  const [webrtcPort, setWebrtcPort] = useState(0)
   const [synced, setSynced] = useState(false)
-  const { status, live, reconnect } = useWhep(videoRef, room)
+  const { status, live, reconnect } = useWhep(videoRef, room, webrtcPort)
 
   // SSE 订阅配置：连接即收到当前快照，管理端一改立即收到新配置并自动切换。
   useEffect(() => {
@@ -15,6 +16,7 @@ export function Viewer() {
       try {
         const c: RelayConfig = JSON.parse(e.data)
         setRoom(c.room)
+        setWebrtcPort(c.ports?.webrtc ?? 8900)
         setSynced(true)
       } catch { /* 忽略心跳/坏包 */ }
     }

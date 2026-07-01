@@ -6,6 +6,7 @@
 //!
 //! 媒体路由由 streamhub 撮合。第 0 步已验证 WHIP→WHEP H.264 直通链路。
 
+mod banner;
 mod clip;
 mod config;
 mod ffmpeg;
@@ -20,9 +21,6 @@ use streamhub::StreamsHub;
 use tokio::sync::{watch, RwLock};
 use xwebrtc::webrtc::WebRTCServer;
 
-const RTMP_ADDR: &str = "0.0.0.0:1935";
-const WHEP_ADDR: &str = "0.0.0.0:8900";
-const WEB_ADDR: &str = "0.0.0.0:8000";
 const GOP_NUM: usize = 1;
 
 #[tokio::main]
@@ -31,6 +29,12 @@ async fn main() {
 
     // 加载/生成配置（config.json）+ 配置变更广播通道
     let loaded = config::load();
+    // 监听地址由 config.ports 决定（端口被占用时改 config.json 即可，无需改代码）
+    let rtmp_addr = format!("0.0.0.0:{}", loaded.ports.rtmp);
+    let whep_addr = format!("0.0.0.0:{}", loaded.ports.webrtc);
+    let web_addr = format!("0.0.0.0:{}", loaded.ports.web);
+    // 启动横幅：ASCII art + 端口/地址表（先于各服务日志打印）
+    banner::print(&loaded.ports);
     // 确定数据根目录（录制/切片），以二进制目录为基准或 config.data_dir，不随 CWD 变化
     let data_root = config::init_data_root(&loaded);
     log::info!("数据目录：{}（录制/切片存放于此）", data_root.display());
@@ -67,7 +71,7 @@ async fn main() {
 
     // RTMP 接收端（可选保留）
     let mut rtmp_server = RtmpServer::new(
-        RTMP_ADDR.to_string(),
+        rtmp_addr.clone(),
         stream_hub.get_hub_event_sender(),
         GOP_NUM,
         None,
@@ -77,11 +81,11 @@ async fn main() {
             log::error!("RTMP 服务退出: {e}");
         }
     });
-    log::info!("RTMP 接收已启动 rtmp://{RTMP_ADDR}/live/<streamKey>（可选）");
+    log::info!("RTMP 接收已启动 rtmp://{rtmp_addr}/live/<streamKey>（可选）");
 
     // WebRTC 端：同端口处理 WHIP(推) 与 WHEP(播)
     let mut webrtc_server = WebRTCServer::new(
-        WHEP_ADDR.to_string(),
+        whep_addr.clone(),
         stream_hub.get_hub_event_sender(),
         None,
     );
@@ -90,8 +94,8 @@ async fn main() {
             log::error!("WebRTC 服务退出: {e}");
         }
     });
-    log::info!("WHIP 推流 http://{WHEP_ADDR}/whip?app=live&stream=<key>");
-    log::info!("WHEP 播放 http://{WHEP_ADDR}/whep?app=live&stream=<key>");
+    log::info!("WHIP 推流 http://{whep_addr}/whip?app=live&stream=<key>");
+    log::info!("WHEP 播放 http://{whep_addr}/whep?app=live&stream=<key>");
 
     // 内网页面 + 配置接口（axum :8000）
     let web_app = web::router(web::WebState {
@@ -100,14 +104,14 @@ async fn main() {
         rec: rec.clone(),
     });
     tokio::spawn(async move {
-        match tokio::net::TcpListener::bind(WEB_ADDR).await {
+        match tokio::net::TcpListener::bind(&web_addr).await {
             Ok(listener) => {
-                log::info!("内网页面已启动 http://{WEB_ADDR}（管理页 + 观看页）");
+                log::info!("内网页面已启动 http://{web_addr}（管理页 + 观看页）");
                 if let Err(e) = axum::serve(listener, web_app).await {
                     log::error!("web 服务退出: {e}");
                 }
             }
-            Err(e) => log::error!("绑定 {WEB_ADDR} 失败: {e}"),
+            Err(e) => log::error!("绑定 {web_addr} 失败: {e}"),
         }
     });
 
