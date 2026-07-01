@@ -74,12 +74,29 @@ async fn parse_segments(session_dir: &Path) -> anyhow::Result<Vec<Seg>> {
     Ok(segs)
 }
 
-/// 从 session 的 HLS 裁出 [start_ms, end_ms] → output(mp4)，`-c copy`。
+/// 按清晰度名生成 ffmpeg 输出侧参数（R4：下载时选清晰度）。
+/// `original`（或无法解析）→ 直拷 `-c copy`（秒级）；`<N>p` → scale 到高 N + libx264 重编码。
+fn quality_args(quality: &str) -> Vec<String> {
+    match quality.strip_suffix('p').and_then(|s| s.parse::<u32>().ok()) {
+        Some(h) => vec![
+            // -2 保持宽高比且宽为偶数（libx264 要求）
+            "-vf".into(), format!("scale=-2:{h}"),
+            "-c:v".into(), "libx264".into(),
+            "-preset".into(), "veryfast".into(),
+            "-crf".into(), "23".into(),
+            "-c:a".into(), "aac".into(),
+        ],
+        None => vec!["-c".into(), "copy".into()],
+    }
+}
+
+/// 从 session 的 HLS 裁出 [start_ms, end_ms] → output(mp4)，按 `quality` 直拷或重编码。
 pub async fn clip_session(
     session_dir: &Path,
     start_ms: u64,
     end_ms: u64,
     output: &Path,
+    quality: &str,
 ) -> anyhow::Result<()> {
     if end_ms <= start_ms {
         anyhow::bail!("结束时间需晚于开始时间");
@@ -121,7 +138,8 @@ pub async fn clip_session(
         .args(["-y", "-f", "concat", "-safe", "0", "-i"])
         .arg(&list_path)
         .args(["-ss", &seek.to_string(), "-t", &duration.to_string()])
-        .args(["-c", "copy", "-avoid_negative_ts", "make_zero"])
+        .args(&quality_args(quality))
+        .args(["-avoid_negative_ts", "make_zero"])
         .arg(output)
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -137,72 +155,53 @@ pub async fn clip_session(
     Ok(())
 }
 
-/// 异步跑一个切片 job：更新 RecStore.jobs 的状态（processing→done/error）。
-/// 由 web 层在 `/api/clip/end` 建 job 后 spawn 调用。
-pub async fn run_job(rec: SharedRec, job_id: String) {
-    // 取 job 参数 + 定位 session 目录
+/// 按需切片（R4：下载时选清晰度）。确保 job 区间在指定 `quality` 下的 mp4 已生成，返回 (文件名, 大小)。
+/// 同一 (job, quality) 的产物按文件名缓存，命中直接返回，不重复切。
+/// 由 web 层的下载准备接口调用（原画秒级直拷，720p/480p 重编码稍慢）。
+pub async fn ensure_clip(
+    rec: &SharedRec,
+    job_id: &str,
+    quality: &str,
+) -> anyhow::Result<(String, String)> {
+    // 取 job 区间 + 定位 session 目录
     let (room, session_id, start_ms, end_ms) = {
-        let mut s = rec.write().await;
-        let Some(job) = s.jobs.iter_mut().find(|j| j.id == job_id) else {
-            return;
-        };
-        job.status = "processing".into();
-        let sid = job.session_id.clone();
-        let (start, end) = (job.start_ms, job.end_ms);
-        let room = s.session(&sid).map(|x| x.room.clone());
-        (room, sid, start, end)
-    };
-    let Some(room) = room else {
-        finish(&rec, &job_id, Err(anyhow::anyhow!("找不到对应录制 session"))).await;
-        return;
+        let s = rec.read().await;
+        let job = s
+            .jobs
+            .iter()
+            .find(|j| j.id == job_id)
+            .ok_or_else(|| anyhow::anyhow!("无此片段 job={job_id}"))?;
+        let room = s
+            .session(&job.session_id)
+            .map(|x| x.room.clone())
+            .ok_or_else(|| anyhow::anyhow!("找不到对应录制 session"))?;
+        (room, job.session_id.clone(), job.start_ms, job.end_ms)
     };
 
     let session_dir = recordings_dir(&room).join(&session_id);
-    let file_name = format!("clip_{job_id}.mp4");
+    let file_name = format!("clip_{job_id}_{quality}.mp4");
     let output = clips_dir().join(&file_name);
 
+    // 缓存命中：已切过该清晰度，直接复用
+    if let Ok(m) = std::fs::metadata(&output) {
+        return Ok((file_name, human_size(m.len())));
+    }
+
     log::info!(
-        "切片开始 job={job_id} session={session_id} [{start_ms}, {end_ms}] ({}s)",
+        "切片开始 job={job_id} quality={quality} session={session_id} [{start_ms}, {end_ms}] ({}s)",
         (end_ms - start_ms) as f64 / 1000.0
     );
-    // 有限重试：刚开录时目标分片可能尚未落盘（m3u8 未写/区间太新），等待后重试；
-    // 切片幂等（输出覆盖），到上限仍失败才记 error。
-    let mut r = clip_session(&session_dir, start_ms, end_ms, &output).await;
+    // 有限重试：刚开录时目标分片可能尚未落盘（m3u8 未写/区间太新），等待后重试；切片幂等（输出覆盖）
+    let mut r = clip_session(&session_dir, start_ms, end_ms, &output, quality).await;
     let mut tries = 0;
     while r.is_err() && tries < 8 {
         tries += 1;
         sleep(Duration::from_millis(500)).await;
-        r = clip_session(&session_dir, start_ms, end_ms, &output).await;
+        r = clip_session(&session_dir, start_ms, end_ms, &output, quality).await;
     }
-    if tries > 0 {
-        log::info!("切片 job={job_id} 重试 {tries} 次后 {}", if r.is_ok() { "成功" } else { "仍失败" });
-    }
+    r?;
 
-    // 成功则记录文件名/大小
-    if r.is_ok() {
-        let mut s = rec.write().await;
-        if let Some(job) = s.jobs.iter_mut().find(|j| j.id == job_id) {
-            job.file = Some(file_name.clone());
-            job.size = std::fs::metadata(&output).map(|m| human_size(m.len())).ok();
-        }
-    }
-    finish(&rec, &job_id, r).await;
-}
-
-async fn finish(rec: &SharedRec, job_id: &str, result: anyhow::Result<()>) {
-    let mut s = rec.write().await;
-    let Some(job) = s.jobs.iter_mut().find(|j| j.id == job_id) else {
-        return;
-    };
-    match result {
-        Ok(()) => {
-            job.status = "done".into();
-            log::info!(target: "user_ops", "切片完成可下载 job={job_id} file={:?} size={:?}", job.file, job.size);
-        }
-        Err(e) => {
-            job.status = "error".into();
-            job.error = Some(e.to_string());
-            log::error!("切片失败 job={job_id}: {e}");
-        }
-    }
+    let size = std::fs::metadata(&output).map(|m| human_size(m.len())).unwrap_or_default();
+    log::info!(target: "user_ops", "切片完成可下载 job={job_id} quality={quality} file={file_name} size={size}");
+    Ok((file_name, size))
 }

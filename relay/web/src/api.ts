@@ -84,6 +84,13 @@ export async function clipEnd(): Promise<ClipJob> {
   return r.json()
 }
 
+/// 下载准备（R4）：按 job + 清晰度按需切片，返回可下载文件名/大小。original 秒级，720p/480p 重编码稍慢。
+export async function prepareClip(id: string, quality: string): Promise<{ file: string; size: string; quality: string }> {
+  const r = await fetch(`/api/clip/prepare/${id}?quality=${encodeURIComponent(quality)}`, { method: 'POST' })
+  if (!r.ok) throw new Error(await r.text())
+  return r.json()
+}
+
 export async function clipStatus(id: string): Promise<ClipJob> {
   const r = await fetch('/api/clip/status/' + id)
   if (!r.ok) throw new Error('查询切片失败 ' + r.status)

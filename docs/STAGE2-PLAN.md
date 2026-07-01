@@ -90,11 +90,15 @@
 - [x] R2 砍管理/录制页 → 单页（录制条+片段/回放并入观看页，去 hash 路由；删 Admin/Recordings.tsx；后端删 POST /api/config 写接口，配置纯看 config.json — D6）
 - [x] R3 回放修正（Library 只列已结束场次 `!r.live`，回放走单页内弹窗独立 HLS VOD 播放器，与直播 WHEP video 完全解耦；根因=旧代码对 live playlist 追尾、观感等同直播 — D2/D7）
 
-### 批次 4 · 录制体验
-- [ ] R4 下载时选清晰度（clip quality_args 重编码 + API + UI）
+### 批次 4 · 录制体验 ✅ 已完成
+- [x] R4 下载时选清晰度：结束录制只登记区间（不预切）；下载时按 quality 切片——
+  `original`=`-c copy` 秒级、`720p/480p`=`scale=-2:N + libx264 crf23` 重编码；
+  同 (job,quality) 产物磁盘缓存复用。接口 `POST /api/clip/prepare/:id?quality=`，前端片段行清晰度按钮组。
 
 ### 批次 5 · 多用户隔离 ⏸ 本阶段推迟
 - [ ] ~~R7 client_id 身份 + mark/jobs per-client + 状态恢复 + 片段隔离~~（推迟到下一阶段）
+
+> 第二阶段除 R7（推迟）外全部完成：批次1 `40690dd`、批次2 `0928b5d`、批次3 `6481113`、批次4（本次）。
 
 ---
 

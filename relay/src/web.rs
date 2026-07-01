@@ -9,7 +9,7 @@
 use std::convert::Infallible;
 
 use axum::{
-    extract::{Path, Request, State},
+    extract::{Path, Query, Request, State},
     http::{header, Method, StatusCode, Uri},
     middleware::{self, Next},
     response::{
@@ -30,6 +30,12 @@ use tower_http::services::ServeDir;
 use crate::clip;
 use crate::config::{self, RelayConfig, SharedConfig};
 use crate::record::{now_ms, ClipJob, ClipMark, SharedRec};
+
+/// 下载准备接口的查询参数：?quality=original|720p|480p（缺省 original）。
+#[derive(serde::Deserialize)]
+struct PrepareQuery {
+    quality: Option<String>,
+}
 
 /// web 层共享状态：当前配置 + 配置变更广播通道 + 录制/切片状态。
 #[derive(Clone)]
@@ -53,6 +59,7 @@ pub fn router(state: WebState) -> Router {
         // 录制/切片
         .route("/api/clip/start", post(clip_start))
         .route("/api/clip/end", post(clip_end))
+        .route("/api/clip/prepare/:id", post(clip_prepare))
         .route("/api/clip/status/:id", get(clip_status))
         .route("/api/clips", get(list_clips))
         .route("/api/recordings", get(list_recordings))
@@ -97,7 +104,8 @@ async fn clip_start(State(st): State<WebState>) -> Result<Json<serde_json::Value
     Ok(Json(resp))
 }
 
-/// 标记「结束录制」：据 [start, now] 建切片 job，异步跑 ffmpeg，返回 job。
+/// 标记「结束录制」：据 [start, now] 登记一个片段区间 job（不预切）。
+/// 实际切片延到下载时按所选清晰度触发（R4），故这里只记区间、状态置 ready。
 async fn clip_end(State(st): State<WebState>) -> Result<Json<ClipJob>, (StatusCode, String)> {
     let job = {
         let mut s = st.rec.write().await;
@@ -114,7 +122,7 @@ async fn clip_end(State(st): State<WebState>) -> Result<Json<ClipJob>, (StatusCo
             session_id: mark.session_id,
             start_ms: mark.start_ms,
             end_ms,
-            status: "processing".into(),
+            status: "ready".into(), // 区间就绪，下载时按清晰度切
             file: None,
             size: None,
             error: None,
@@ -125,12 +133,29 @@ async fn clip_end(State(st): State<WebState>) -> Result<Json<ClipJob>, (StatusCo
     };
     log::info!(
         target: "user_ops",
-        "结束录制 session={} 区间=[{}, {}] 建切片 job={}",
+        "结束录制 session={} 区间=[{}, {}] 片段 job={}（下载时选清晰度切片）",
         job.session_id, job.start_ms, job.end_ms, job.id
     );
-    // 异步执行切片
-    tokio::spawn(clip::run_job(st.rec.clone(), job.id.clone()));
     Ok(Json(job))
+}
+
+/// 下载准备（R4）：按 job + 所选清晰度按需切片（缓存复用），返回可下载文件名/大小。
+/// original 直拷（秒级），720p/480p 重编码（稍慢），前端据返回 file 触发 /clips/<file> 下载。
+async fn clip_prepare(
+    State(st): State<WebState>,
+    Path(id): Path<String>,
+    Query(q): Query<PrepareQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let quality = q.quality.unwrap_or_else(|| "original".into());
+    // 校验清晰度须在 config.qualities 中，避免任意 scale 参数
+    if !st.cfg.read().await.qualities.iter().any(|x| x.name == quality) {
+        return Err((StatusCode::BAD_REQUEST, format!("未知清晰度 {quality}")));
+    }
+    let (file, size) = clip::ensure_clip(&st.rec, &id, &quality)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    log::info!(target: "user_ops", "下载准备 job={id} quality={quality} file={file}");
+    Ok(Json(json!({ "file": file, "size": size, "quality": quality })))
 }
 
 /// 查询单个切片 job 进度。

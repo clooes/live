@@ -2,9 +2,9 @@ import { useEffect, useRef, useState } from 'react'
 import { QRCodeSVG } from 'qrcode.react'
 import { useWhep } from '../whep'
 import {
-  clipStart, clipEnd, clipStatus, clipUrl, getLanIp,
+  clipStart, clipEnd, clipUrl, prepareClip, getLanIp, getConfig,
   listClips, listRecordings,
-  type ClipJob, type Recording, type RelayConfig,
+  type ClipJob, type Quality, type Recording, type RelayConfig,
 } from '../api'
 
 export function Viewer() {
@@ -92,11 +92,12 @@ function ShareButton() {
   )
 }
 
-/// 录制条：看直播时点「开始/结束录制」标记一段区间，据起止时间切片下载。
+/// 录制条：看直播时点「开始/结束录制」标记一段区间。切片延到下载时按清晰度生成（R4），
+/// 结束后片段出现在下方「片段切片」列表，在那里选清晰度下载。
 function RecordBar({ live }: { live: boolean }) {
   const [marking, setMarking] = useState(false)
   const [startAt, setStartAt] = useState<number | null>(null)
-  const [job, setJob] = useState<ClipJob | null>(null)
+  const [saved, setSaved] = useState(false)
   const [err, setErr] = useState('')
   const [elapsed, setElapsed] = useState(0)
 
@@ -108,7 +109,7 @@ function RecordBar({ live }: { live: boolean }) {
   }, [marking, startAt])
 
   async function onStart() {
-    setErr(''); setJob(null)
+    setErr(''); setSaved(false)
     try {
       await clipStart()
       setStartAt(Date.now()); setElapsed(0); setMarking(true)
@@ -118,21 +119,9 @@ function RecordBar({ live }: { live: boolean }) {
   async function onEnd() {
     setMarking(false)
     try {
-      const j = await clipEnd()
-      setJob(j)
-      pollJob(j.id)
+      await clipEnd()
+      setSaved(true)
     } catch (e) { setErr(String(e)) }
-  }
-
-  // 轮询切片进度直到 done/error
-  function pollJob(id: string) {
-    const timer = setInterval(async () => {
-      try {
-        const j = await clipStatus(id)
-        setJob(j)
-        if (j.status !== 'processing') clearInterval(timer)
-      } catch { clearInterval(timer) }
-    }, 1000)
   }
 
   return (
@@ -145,15 +134,7 @@ function RecordBar({ live }: { live: boolean }) {
       ) : (
         <button onClick={onEnd}>■ 结束录制（{elapsed}s）</button>
       )}
-      {job && (
-        <span className="rec-status">
-          {job.status === 'processing' && '切片中…'}
-          {job.status === 'error' && <span className="rec-err">失败：{job.error}</span>}
-          {job.status === 'done' && job.file && (
-            <a href={clipUrl(job.file)} download>⬇ 下载片段（{job.size}）</a>
-          )}
-        </span>
-      )}
+      {saved && <span className="rec-status">已保存，见下方「片段切片」选清晰度下载 ↓</span>}
       {err && <span className="rec-err">{err}</span>}
     </div>
   )
@@ -174,6 +155,7 @@ function fmtDur(a: number, b: number | null): string {
 function Library() {
   const [clips, setClips] = useState<ClipJob[]>([])
   const [recs, setRecs] = useState<Recording[]>([])
+  const [qualities, setQualities] = useState<Quality[]>([])
   const [replay, setReplay] = useState<Recording | null>(null) // 正在回放的场次（null=关闭弹窗）
 
   async function refresh() {
@@ -185,6 +167,8 @@ function Library() {
   useEffect(() => {
     refresh()
     const t = setInterval(refresh, 3000)
+    // 清晰度档来自 config.json（R4 下载时选），拉一次即可
+    getConfig().then((c) => setQualities(c.qualities)).catch(() => {})
     return () => clearInterval(t)
   }, [])
 
@@ -200,19 +184,14 @@ function Library() {
       {clips.length > 0 && (
         <table className="qtable">
           <thead>
-            <tr><th>时间</th><th>时长</th><th>状态</th><th>操作</th></tr>
+            <tr><th>时间</th><th>时长</th><th>下载（选清晰度）</th></tr>
           </thead>
           <tbody>
             {clips.map((c) => (
               <tr key={c.id}>
                 <td>{fmtTime(c.created_at_ms)}</td>
                 <td>{Math.round((c.end_ms - c.start_ms) / 1000)}s</td>
-                <td>
-                  {c.status === 'processing' && '切片中…'}
-                  {c.status === 'done' && <span className="ok">完成 {c.size}</span>}
-                  {c.status === 'error' && <span className="rec-err" title={c.error || ''}>失败</span>}
-                </td>
-                <td>{c.status === 'done' && c.file && <a href={clipUrl(c.file)} download>下载</a>}</td>
+                <td><ClipDownload clip={c} qualities={qualities} /></td>
               </tr>
             ))}
           </tbody>
@@ -240,6 +219,39 @@ function Library() {
 
       {replay && <ReplayModal rec={replay} onClose={() => setReplay(null)} />}
     </div>
+  )
+}
+
+/// 单个片段的清晰度下载（R4）：每个清晰度一个按钮，点击后按需切片（original 秒级 / 720p·480p 重编码），
+/// 就绪即触发浏览器下载。同一清晰度切好后服务端缓存，再点即秒下。
+function ClipDownload({ clip, qualities }: { clip: ClipJob; qualities: Quality[] }) {
+  const [busy, setBusy] = useState('') // 正在准备的清晰度名
+  const [err, setErr] = useState('')
+
+  async function onPick(q: string) {
+    setErr(''); setBusy(q)
+    try {
+      const { file } = await prepareClip(clip.id, q)
+      // 触发下载（download 属性 + 程序化点击）
+      const a = document.createElement('a')
+      a.href = clipUrl(file); a.download = ''
+      document.body.appendChild(a); a.click(); a.remove()
+    } catch (e) {
+      setErr(String(e))
+    } finally {
+      setBusy('')
+    }
+  }
+
+  return (
+    <span className="clip-dl">
+      {qualities.map((q) => (
+        <button key={q.name} onClick={() => onPick(q.name)} disabled={!!busy}>
+          {busy === q.name ? '生成中…' : q.name}
+        </button>
+      ))}
+      {err && <span className="rec-err">{err}</span>}
+    </span>
   )
 }
 

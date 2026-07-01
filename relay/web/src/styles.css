@@ -102,3 +102,6 @@ button.primary:disabled { opacity: .6; cursor: default; }
 /* 回放弹窗加宽以容纳视频 */
 .modal-wide { max-width: 720px; width: 90vw; }
 .modal-wide .player.replay { width: 100%; aspect-ratio: 16 / 9; background: #000; margin-bottom: 14px; }
+/* 片段清晰度下载按钮组 */
+.clip-dl { display: inline-flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.clip-dl button { padding: 3px 10px; font-size: 12px; }
