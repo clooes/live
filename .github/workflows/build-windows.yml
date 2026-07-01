@@ -1,0 +1,65 @@
+name: build-windows
+
+# 在 GitHub 的 windows runner 上原生编译 relay.exe（含嵌入前端 + 内置 ffmpeg）。
+# 触发：手动（Actions 页点 Run workflow）或推 v* tag。
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # 1) 构建前端 → relay/web/dist（rust-embed 编译期会把它打进二进制）
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Build frontend
+        working-directory: relay/web
+        run: |
+          npm install
+          npm run build
+
+      # 2) Rust MSVC 工具链
+      - name: Setup Rust (MSVC)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      # 3) C 依赖的汇编器：openssl-src / opus 等 -sys crate 需要 NASM（Perl/CMake runner 已预装）
+      - name: Install NASM
+        run: choco install nasm -y
+      - name: Add NASM to PATH
+        shell: pwsh
+        run: echo "C:\Program Files\NASM" >> $env:GITHUB_PATH
+
+      # 4) 放入 Windows 静态 ffmpeg.exe → build.rs 检测到即嵌入
+      - name: Fetch static ffmpeg.exe
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" -OutFile ffmpeg.zip
+          Expand-Archive ffmpeg.zip -DestinationPath ffmpeg_tmp
+          $exe = Get-ChildItem -Recurse ffmpeg_tmp -Filter ffmpeg.exe | Select-Object -First 1
+          New-Item -ItemType Directory -Force -Path relay/vendor/ffmpeg/windows-x64 | Out-Null
+          Copy-Item $exe.FullName relay/vendor/ffmpeg/windows-x64/ffmpeg.exe
+          Write-Host "ffmpeg.exe 就位：$((Get-Item relay/vendor/ffmpeg/windows-x64/ffmpeg.exe).Length) bytes"
+
+      # 5) 编译 release
+      - name: Build relay (release)
+        working-directory: relay
+        run: cargo build --release
+
+      # 6) 上传产物
+      - name: Upload relay.exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: relay-windows-x64
+          path: relay/target/release/relay.exe
+          if-no-files-found: error

@@ -1,0 +1,3 @@
+# 静态 ffmpeg 二进制不入库（体积大，按平台放入后本地/CI 编译时嵌入）
+*/ffmpeg
+*/ffmpeg.exe

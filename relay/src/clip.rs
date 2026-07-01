@@ -1,0 +1,208 @@
+//! 时间切片：从某场录制的连续 HLS（index.m3u8 + .ts）按绝对时间区间裁出一段 mp4。
+//!
+//! 录制时每个分片写了 `#EXT-X-PROGRAM-DATE-TIME`（该片首帧的墙钟时间），
+//! 因此可用「绝对时间」精确对齐——避免用「相对 session 起点的秒偏移」时，
+//! Publish 事件到首个关键帧之间那 ~2s 空档造成的错位。
+//!
+//! 流程：解析 m3u8 建「分片→[起,止]墙钟ms」→ 选覆盖 [start_ms,end_ms] 的连续 .ts →
+//! ffmpeg concat 合并 + `-ss/-t` 精修两端，`-c copy` 不重编码（秒级）。
+
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+
+use chrono::DateTime;
+use tokio::process::Command;
+use tokio::time::{sleep, Duration};
+
+/// 解析 HLS `#EXT-X-PROGRAM-DATE-TIME` 的时间为 epoch 毫秒。
+/// ffmpeg 写出的偏移是 `+0800`（无冒号），不是严格 RFC3339 的 `+08:00`——
+/// 先按 ffmpeg 格式解析，再回退 RFC3339，避免解析失败退化成相对时间轴。
+fn parse_pdt_ms(s: &str) -> Option<u64> {
+    DateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.f%z")
+        .or_else(|_| DateTime::parse_from_rfc3339(s))
+        .ok()
+        .map(|dt| dt.timestamp_millis() as u64)
+}
+
+use crate::record::{human_size, recordings_dir, SharedRec};
+
+/// 切片输出目录（在配置的数据根目录下，默认二进制同目录 data/）。
+pub fn clips_dir() -> PathBuf {
+    crate::config::data_root().join("clips")
+}
+
+/// 一个 HLS 分片在墙钟时间轴上的位置。
+struct Seg {
+    path: PathBuf,
+    start_ms: u64,
+    end_ms: u64,
+}
+
+/// 解析某 session 的 index.m3u8 → 分片墙钟时间轴。
+async fn parse_segments(session_dir: &Path) -> anyhow::Result<Vec<Seg>> {
+    let m3u8 = session_dir.join("index.m3u8");
+    let content = tokio::fs::read_to_string(&m3u8)
+        .await
+        .map_err(|e| anyhow::anyhow!("读取 m3u8 失败（录制未开始或无切片）: {e}"))?;
+
+    let mut segs: Vec<Seg> = Vec::new();
+    let mut seg_dur = 0.0f64; // 最近 #EXTINF 秒
+    let mut pdt_ms: Option<u64> = None; // 最近 #EXT-X-PROGRAM-DATE-TIME
+    let mut cursor_ms: Option<u64> = None; // 无 PDT 时按 EXTINF 累加推算
+
+    for line in content.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("#EXTINF:") {
+            seg_dur = rest.split(',').next().unwrap_or("0").trim().parse().unwrap_or(0.0);
+        } else if let Some(rest) = line.strip_prefix("#EXT-X-PROGRAM-DATE-TIME:") {
+            pdt_ms = parse_pdt_ms(rest.trim());
+        } else if !line.is_empty() && !line.starts_with('#') {
+            let dur_ms = (seg_dur * 1000.0) as u64;
+            let start = pdt_ms.or(cursor_ms).unwrap_or(0);
+            segs.push(Seg {
+                path: session_dir.join(line),
+                start_ms: start,
+                end_ms: start + dur_ms,
+            });
+            cursor_ms = Some(start + dur_ms);
+            pdt_ms = None;
+        }
+    }
+    if segs.is_empty() {
+        anyhow::bail!("HLS 暂无切片");
+    }
+    Ok(segs)
+}
+
+/// 从 session 的 HLS 裁出 [start_ms, end_ms] → output(mp4)，`-c copy`。
+pub async fn clip_session(
+    session_dir: &Path,
+    start_ms: u64,
+    end_ms: u64,
+    output: &Path,
+) -> anyhow::Result<()> {
+    if end_ms <= start_ms {
+        anyhow::bail!("结束时间需晚于开始时间");
+    }
+    let segs = parse_segments(session_dir).await?;
+
+    // 选覆盖 [start_ms, end_ms) 的连续分片
+    let chosen: Vec<&Seg> = segs
+        .iter()
+        .filter(|s| s.end_ms > start_ms && s.start_ms < end_ms)
+        .collect();
+    if chosen.is_empty() {
+        anyhow::bail!("HLS 切片未覆盖该区间（区间太新或已过期），稍等重试");
+    }
+
+    // 相对首片的精修偏移 + 时长（秒）
+    let seek = (start_ms.saturating_sub(chosen[0].start_ms)) as f64 / 1000.0;
+    let duration = (end_ms - start_ms) as f64 / 1000.0;
+
+    // concat 列表（临时文件）
+    let stem = output.file_stem().and_then(|s| s.to_str()).unwrap_or("clip");
+    let list_path = std::env::temp_dir().join(format!("relay_concat_{stem}.txt"));
+    let mut list = String::new();
+    for s in &chosen {
+        // concat demuxer 按「list 文件所在目录」解析相对路径，而 list 放在临时目录，
+        // 故必须写绝对路径（canonicalize 需文件存在，失败则用 CWD 拼接兜底）。
+        let abs = std::fs::canonicalize(&s.path).unwrap_or_else(|_| {
+            std::env::current_dir().unwrap_or_default().join(&s.path)
+        });
+        list.push_str(&format!("file '{}'\n", abs.display()));
+    }
+    tokio::fs::write(&list_path, &list).await?;
+    if let Some(parent) = output.parent() {
+        let _ = tokio::fs::create_dir_all(parent).await;
+    }
+
+    // concat + 输出侧 seek（-ss 在 -i 后）精修；.ts 以关键帧起头，落点较准
+    let out = Command::new(crate::ffmpeg::path())
+        .args(["-y", "-f", "concat", "-safe", "0", "-i"])
+        .arg(&list_path)
+        .args(["-ss", &seek.to_string(), "-t", &duration.to_string()])
+        .args(["-c", "copy", "-avoid_negative_ts", "make_zero"])
+        .arg(output)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .output()
+        .await?;
+    let _ = tokio::fs::remove_file(&list_path).await;
+    if !out.status.success() {
+        anyhow::bail!(
+            "ffmpeg concat 失败: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+/// 异步跑一个切片 job：更新 RecStore.jobs 的状态（processing→done/error）。
+/// 由 web 层在 `/api/clip/end` 建 job 后 spawn 调用。
+pub async fn run_job(rec: SharedRec, job_id: String) {
+    // 取 job 参数 + 定位 session 目录
+    let (room, session_id, start_ms, end_ms) = {
+        let mut s = rec.write().await;
+        let Some(job) = s.jobs.iter_mut().find(|j| j.id == job_id) else {
+            return;
+        };
+        job.status = "processing".into();
+        let sid = job.session_id.clone();
+        let (start, end) = (job.start_ms, job.end_ms);
+        let room = s.session(&sid).map(|x| x.room.clone());
+        (room, sid, start, end)
+    };
+    let Some(room) = room else {
+        finish(&rec, &job_id, Err(anyhow::anyhow!("找不到对应录制 session"))).await;
+        return;
+    };
+
+    let session_dir = recordings_dir(&room).join(&session_id);
+    let file_name = format!("clip_{job_id}.mp4");
+    let output = clips_dir().join(&file_name);
+
+    log::info!(
+        "切片开始 job={job_id} session={session_id} [{start_ms}, {end_ms}] ({}s)",
+        (end_ms - start_ms) as f64 / 1000.0
+    );
+    // 有限重试：刚开录时目标分片可能尚未落盘（m3u8 未写/区间太新），等待后重试；
+    // 切片幂等（输出覆盖），到上限仍失败才记 error。
+    let mut r = clip_session(&session_dir, start_ms, end_ms, &output).await;
+    let mut tries = 0;
+    while r.is_err() && tries < 8 {
+        tries += 1;
+        sleep(Duration::from_millis(500)).await;
+        r = clip_session(&session_dir, start_ms, end_ms, &output).await;
+    }
+    if tries > 0 {
+        log::info!("切片 job={job_id} 重试 {tries} 次后 {}", if r.is_ok() { "成功" } else { "仍失败" });
+    }
+
+    // 成功则记录文件名/大小
+    if r.is_ok() {
+        let mut s = rec.write().await;
+        if let Some(job) = s.jobs.iter_mut().find(|j| j.id == job_id) {
+            job.file = Some(file_name.clone());
+            job.size = std::fs::metadata(&output).map(|m| human_size(m.len())).ok();
+        }
+    }
+    finish(&rec, &job_id, r).await;
+}
+
+async fn finish(rec: &SharedRec, job_id: &str, result: anyhow::Result<()>) {
+    let mut s = rec.write().await;
+    let Some(job) = s.jobs.iter_mut().find(|j| j.id == job_id) else {
+        return;
+    };
+    match result {
+        Ok(()) => {
+            job.status = "done".into();
+            log::info!("切片完成 job={job_id} -> {:?} ({:?})", job.file, job.size);
+        }
+        Err(e) => {
+            job.status = "error".into();
+            job.error = Some(e.to_string());
+            log::error!("切片失败 job={job_id}: {e}");
+        }
+    }
+}

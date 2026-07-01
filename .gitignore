@@ -1,0 +1,29 @@
+# 系统
+.DS_Store
+
+# Rust 构建产物
+/relay/target/
+
+# 前端（node_modules 与构建产物；dist 由 CI/本地 npm run build 生成，rust-embed 编译期需要）
+/relay/web/node_modules/
+/relay/web/dist/
+
+# 运行时数据（录制/切片，默认在二进制目录，或 config.data_dir 指定处）
+/data/
+**/data/recordings/
+**/data/clips/
+config.json
+
+# 内置 ffmpeg 静态二进制（大文件，不入库；vendor/ffmpeg/README 与 .gitkeep 保留）
+/relay/vendor/ffmpeg/*/ffmpeg
+/relay/vendor/ffmpeg/*/ffmpeg.exe
+
+# Flutter 客户端
+/app/build/
+/app/.dart_tool/
+/app/.flutter-plugins*
+/app/ios/Pods/
+
+# 日志与临时
+/logs/
+*.log

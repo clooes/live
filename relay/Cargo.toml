@@ -1,0 +1,32 @@
+[package]
+name = "relay"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+log = "0.4"
+env_logger = "0.11"
+anyhow = "1"
+
+# xiu 纯 Rust 媒体内核（RTMP 接收 + WHEP 输出 + 媒体路由）
+streamhub = "0.2.4"
+rtmp = "0.6.5"
+xwebrtc = "0.3.5"
+commonlib = "0.1.2"
+
+# 内网页面 + 配置接口（:8000）
+axum = "0.7"
+tower-http = { version = "0.5", features = ["cors", "fs"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rust-embed = { version = "8", features = ["mime-guess"] }
+mime_guess = "2"
+tokio-stream = { version = "0.1", features = ["sync"] }
+futures = "0.3"
+chrono = "0.4"
+
+# 本地补丁：修复 xwebrtc 0.3.5 whip.rs 硬编码 H264 payload_type=96 的 bug，
+# 改为使用 SDP 协商出的动态 PT（否则 ffmpeg 等协商成 106 时视频包被全部丢弃）。
+[patch.crates-io]
+xwebrtc = { path = "vendor/xwebrtc" }

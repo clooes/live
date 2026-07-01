@@ -1,0 +1,82 @@
+:root { color-scheme: dark; }
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, "PingFang SC", sans-serif;
+  background: #0e0f13;
+  color: #e8e8ea;
+}
+.app { max-width: 900px; margin: 0 auto; padding: 0 16px 40px; }
+
+.nav {
+  display: flex; align-items: center; gap: 24px;
+  padding: 14px 0; border-bottom: 1px solid #23252b; margin-bottom: 20px;
+}
+.brand { font-weight: 700; font-size: 18px; }
+.nav nav { display: flex; gap: 16px; }
+.nav a { color: #9aa0aa; text-decoration: none; padding: 4px 8px; border-radius: 6px; }
+.nav a.active { color: #fff; background: #2a2d36; }
+
+/* 观看页 */
+.player-wrap { position: relative; background: #000; border-radius: 10px; overflow: hidden; }
+.player { width: 100%; aspect-ratio: 16 / 9; display: block; background: #000; }
+.overlay {
+  position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+  color: #cbd0d8; background: rgba(0,0,0,.35); font-size: 14px;
+}
+.bar { display: flex; align-items: center; gap: 12px; margin-top: 12px; font-size: 14px; }
+.dot { width: 9px; height: 9px; border-radius: 50%; background: #666; }
+.dot.live { background: #e5484d; box-shadow: 0 0 0 4px rgba(229,72,77,.2); }
+.room { margin-left: auto; color: #9aa0aa; }
+.sync { color: #6b7280; font-size: 12px; }
+button {
+  background: #2a2d36; color: #e8e8ea; border: 1px solid #3a3d47;
+  padding: 6px 14px; border-radius: 6px; cursor: pointer;
+}
+button:hover { background: #343843; }
+button.primary { background: #3b82f6; border-color: #3b82f6; color: #fff; }
+button.primary:disabled { opacity: .6; cursor: default; }
+
+/* 录制条（观看页） */
+.recbar {
+  display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+  margin-top: 14px; padding-top: 14px; border-top: 1px solid #23252b; font-size: 14px;
+}
+.rec-title { color: #9aa0aa; font-size: 13px; }
+.rec-status a, .rec-link { color: #3b82f6; text-decoration: none; }
+.rec-status a:hover, .rec-link:hover { text-decoration: underline; }
+.rec-link { margin-left: auto; color: #9aa0aa; }
+.rec-err { color: #e5484d; }
+
+/* 录制页 */
+.recordings h2 { margin: 8px 0 14px; font-size: 17px; }
+.muted { color: #6b7280; }
+.ok { color: #3fb950; }
+.rec-list { list-style: none; padding: 0; margin: 0 0 28px; }
+.rec-list li { border-top: 1px solid #23252b; padding: 10px 0; }
+.rec-row { display: flex; align-items: center; gap: 14px; }
+.player.replay { margin-top: 10px; border-radius: 8px; }
+
+/* 管理页 */
+.admin h2 { margin: 4px 0 20px; }
+.field { display: block; margin-bottom: 22px; }
+.field > span { display: block; color: #9aa0aa; font-size: 13px; margin-bottom: 8px; }
+.field input[type="text"], .field > input {
+  width: 100%; max-width: 320px; padding: 8px 10px;
+  background: #17191f; border: 1px solid #2c2f38; border-radius: 6px; color: #e8e8ea;
+}
+.qtable { border-collapse: collapse; width: 100%; max-width: 520px; }
+.qtable th { text-align: left; color: #9aa0aa; font-weight: 500; font-size: 12px; padding: 6px 8px; }
+.qtable td { padding: 6px 8px; border-top: 1px solid #23252b; }
+.qtable input[type="text"], .qtable input[type="number"] {
+  width: 130px; padding: 6px 8px; background: #17191f;
+  border: 1px solid #2c2f38; border-radius: 6px; color: #e8e8ea;
+}
+.actions { display: flex; align-items: center; gap: 14px; margin: 8px 0 28px; }
+.msg { font-size: 14px; }
+.tips { border-top: 1px solid #23252b; padding-top: 16px; color: #b9bec8; font-size: 14px; }
+.tips code {
+  background: #17191f; padding: 2px 6px; border-radius: 4px;
+  font-size: 13px; word-break: break-all;
+}
+.tips ol { padding-left: 20px; line-height: 1.9; }
