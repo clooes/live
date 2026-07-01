@@ -94,7 +94,10 @@ impl WebRTCServerSession {
 
         let mut remaining_data = self.reader.get_remaining_bytes();
 
-        if let Some(content_length) = parse_content_length(std::str::from_utf8(&remaining_data)?) {
+        // HTTP 头本应是 ASCII；非 UTF-8（浏览器 https 探测、端口扫描等杂散/二进制连接）
+        // 不再传播 Utf8Error 打断 session，改用 lossy 解析——非 HTTP 连接会解析为 None 被优雅忽略。
+        let content_length = parse_content_length(&String::from_utf8_lossy(&remaining_data));
+        if let Some(content_length) = content_length {
             while remaining_data.len() < content_length as usize {
                 log::trace!(
                     "content_length: {} {}",
@@ -109,7 +112,8 @@ impl WebRTCServerSession {
 
         let request_data = self.reader.extract_remaining_bytes();
 
-        if let Some(http_request) = HttpRequest::unmarshal(std::str::from_utf8(&request_data)?) {
+        let request_str = String::from_utf8_lossy(&request_data);
+        if let Some(http_request) = HttpRequest::unmarshal(&request_str) {
             //POST /whip?app=live&stream=test HTTP/1.1
             let eles: Vec<&str> = http_request.uri.path.splitn(2, '/').collect();
             let pars_map = &http_request.query_pairs;
