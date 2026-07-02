@@ -107,6 +107,44 @@ pub fn recordings_dir(room: &str) -> PathBuf {
     crate::config::data_root().join("recordings").join(room)
 }
 
+/// AAC-LC / 48000Hz / 立体声 的 7 字节 ADTS 头。
+/// whip 端 Opus→AAC 转码出的是无头 raw AAC，喂 ffmpeg `-f aac` 需要每帧带 ADTS 头。
+/// 参数与 whip.rs 里 `Mpeg4Aac::new(2, 48000, 2)` 对应（object type 2 / 48k / 2ch）。
+fn adts_header(payload_len: usize) -> [u8; 7] {
+    let framelen = (payload_len + 7) as u32; // 含 7 字节头
+    const PROFILE: u8 = 1; // AAC-LC：object type 2 → ADTS profile = 2-1
+    const FREQ_IDX: u8 = 3; // 48000Hz
+    const CHAN: u8 = 2; // 立体声
+    [
+        0xFF,
+        0xF1, // syncword(12) + MPEG-4(0) + layer(00) + protection_absent(1)
+        (PROFILE << 6) | (FREQ_IDX << 2) | (CHAN >> 2),
+        ((CHAN & 3) << 6) | ((framelen >> 11) as u8 & 0x03),
+        ((framelen >> 3) & 0xFF) as u8,
+        (((framelen & 7) as u8) << 5) | 0x1F,
+        0xFC, // buffer fullness 低位 + num_raw_blocks-1=0
+    ]
+}
+
+/// 创建 Unix 命名管道（给 ffmpeg 的第二路音频输入）。Windows 无 mkfifo，R10 首版仅 mac/Linux（D15）。
+#[cfg(unix)]
+fn mkfifo_at(path: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let c = std::ffi::CString::new(path.as_os_str().as_bytes())
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+    let r = unsafe { libc::mkfifo(c.as_ptr(), 0o644) };
+    if r == 0 { Ok(()) } else { Err(std::io::Error::last_os_error()) }
+}
+
+/// 标记某场录制已结束（live=false + 结束时刻）。
+async fn mark_ended(rec: &SharedRec, session_id: &str) {
+    let mut s = rec.write().await;
+    if let Some(sess) = s.sessions.iter_mut().find(|x| x.id == session_id) {
+        sess.live = false;
+        sess.ended_at_ms = Some(now_ms());
+    }
+}
+
 /// 启动录制管理器：监听 client-event，自动为目标 room 开录。
 pub fn spawn(
     hub_sender: StreamHubEventSender,
@@ -187,35 +225,10 @@ async fn start_session(
         _ => { log::error!("录制订阅结果错误"); return; }
     };
 
-    // 拉起 ffmpeg：裸 H264(Annex-B) 进 → HLS 出
     let m3u8 = dir.join("index.m3u8");
     let seg = dir.join("%d.ts");
-    let ff_log = std::fs::File::create(dir.join("ffmpeg.log")).ok();
-    let mut cmd = Command::new(crate::ffmpeg::path());
-    cmd.args(["-hide_banner", "-loglevel", "warning"])
-        .args(["-analyzeduration", "10000000", "-probesize", "10000000"])
-        .args(["-use_wallclock_as_timestamps", "1"])
-        .args(["-f", "h264", "-i", "pipe:0"])
-        .args(["-c:v", "copy", "-f", "hls"])
-        .args(["-hls_time", &SEGMENT_SECS.to_string()])
-        .args(["-hls_list_size", "0"]) // 保留全部片（录制）
-        .args(["-hls_flags", "append_list+program_date_time"])
-        .arg("-hls_segment_filename").arg(&seg)
-        .arg(&m3u8)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(ff_log.map(Stdio::from).unwrap_or_else(Stdio::null));
-    // 让 ffmpeg 脱离 relay 的前台进程组：关终端窗口发给进程组的 SIGHUP 不会直接杀它，
-    // 改由 relay 收到信号后主动关它 stdin、等它写完 ENDLIST 再退出（优雅收尾，见 main.rs）。
-    #[cfg(unix)]
-    cmd.process_group(0);
-    let mut child = match cmd.spawn() {
-        Ok(c) => c,
-        Err(e) => { log::error!("拉起 ffmpeg 失败（PATH 是否有 ffmpeg?）: {e}"); return; }
-    };
-    let mut stdin = child.stdin.take().expect("ffmpeg stdin");
 
-    // 登记 session
+    // 登记 session（ffmpeg 延后到「探测出有无音频」后再启动，故先登记为直播中）
     {
         let mut s = rec.write().await;
         s.sessions.push(Session {
@@ -229,44 +242,155 @@ async fn start_session(
     log::info!("▶ 开始录制 session={session_id} room={stream} → {}/", dir.display());
 
     let handle = tokio::spawn(async move {
-        let mut nv = 0u64;
-        // 收帧 → 写 ffmpeg stdin。两种收尾：frame_rx 返回 None（停流），或收到进程退出信号。
+        // ---- 预备阶段：探测这路流有无音频，同时缓冲视频帧 ----
+        // 音频一般与视频同时到达；最多等 PREAMBLE_MS，仍无音频即判定纯视频，
+        // 避免给 ffmpeg 挂一路「永远没数据的音频输入」导致它空等卡死（D14 静默出片的前提）。
+        const PREAMBLE_MS: u64 = 1500;
+        let preamble_start = now_ms();
+        let mut pending_video = Vec::new();
+        let mut has_audio = false;
+        let mut ended_in_preamble = false;
         loop {
+            let elapsed = now_ms().saturating_sub(preamble_start);
+            if elapsed >= PREAMBLE_MS {
+                break;
+            }
+            let remaining = Duration::from_millis(PREAMBLE_MS - elapsed);
             tokio::select! {
                 frame = frame_rx.recv() => match frame {
-                    Some(FrameData::Video { data, .. }) => {
-                        nv += 1;
-                        if nv <= 3 || nv.is_multiple_of(300) {
-                            log::info!("录制写入视频帧 #{nv} ({}B) session={session_id}", data.len());
-                        }
-                        if let Err(e) = stdin.write_all(&data).await {
-                            log::warn!("写 ffmpeg stdin 失败（ffmpeg 退出?）: {e}");
-                            break;
-                        }
-                    }
-                    Some(_) => {} // 首版只录视频；音频/MediaInfo 暂忽略
-                    None => break, // 停流：所有发布者已 drop
+                    Some(FrameData::Video { data, .. }) => pending_video.push(data),
+                    // 首个音频帧是 AAC 配置头(ASC)，丢弃即可（ADTS 自带配置）；见到即判定有音频
+                    Some(FrameData::Audio { .. }) => { has_audio = true; break; }
+                    Some(_) => {}
+                    None => { ended_in_preamble = true; break; }
                 },
-                _ = shutdown.changed() => {
-                    log::info!("收到退出信号，收尾录制 session={session_id}");
-                    break;
+                _ = shutdown.changed() => { ended_in_preamble = true; break; }
+                _ = tokio::time::sleep(remaining) => break,
+            }
+        }
+        log::info!(
+            "录制探测完成 session={session_id} 音频={} 预备缓冲视频帧={}",
+            if has_audio { "有" } else { "无" }, pending_video.len()
+        );
+
+        // ---- 据探测结果拉起 ffmpeg：有音频=视频(stdin)+音频(fifo)双路；无音频=纯视频单路 ----
+        let audio_fifo = dir.join("audio.aac");
+        let ff_log = std::fs::File::create(dir.join("ffmpeg.log")).ok();
+        let mut cmd = Command::new(crate::ffmpeg::path());
+        cmd.args(["-hide_banner", "-loglevel", "warning"])
+            .args(["-analyzeduration", "10000000", "-probesize", "10000000"])
+            .args(["-use_wallclock_as_timestamps", "1"])
+            .args(["-f", "h264", "-i", "pipe:0"]);
+        if has_audio {
+            let _ = std::fs::remove_file(&audio_fifo);
+            #[cfg(unix)]
+            {
+                if let Err(e) = mkfifo_at(&audio_fifo) {
+                    log::warn!("创建音频管道失败，降级为纯视频 session={session_id}: {e}");
+                    has_audio = false;
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                log::warn!("非 Unix 暂不支持音频录制（R10 待补 Windows 命名管道），降级为纯视频");
+                has_audio = false;
+            }
+            if has_audio {
+                // 音频第二路也按墙钟打时间戳，与视频近似同步（D13：先墙钟近似）
+                cmd.args(["-use_wallclock_as_timestamps", "1"])
+                    .args(["-f", "aac", "-i"]).arg(&audio_fifo);
+            }
+        }
+        if has_audio {
+            cmd.args(["-c:v", "copy", "-c:a", "copy"]);
+        } else {
+            cmd.args(["-c:v", "copy"]);
+        }
+        cmd.args(["-f", "hls"])
+            .args(["-hls_time", &SEGMENT_SECS.to_string()])
+            .args(["-hls_list_size", "0"]) // 保留全部片（录制）
+            .args(["-hls_flags", "append_list+program_date_time"])
+            .arg("-hls_segment_filename").arg(&seg)
+            .arg(&m3u8)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(ff_log.map(Stdio::from).unwrap_or_else(Stdio::null));
+        // 脱离前台进程组：关终端的 SIGHUP 不直接杀它，改由 relay 收到信号后关管道、等它写完 ENDLIST（见 main.rs）
+        #[cfg(unix)]
+        cmd.process_group(0);
+        let mut child = match cmd.spawn() {
+            Ok(c) => c,
+            Err(e) => {
+                log::error!("拉起 ffmpeg 失败（PATH 是否有 ffmpeg?）session={session_id}: {e}");
+                mark_ended(&rec, &session_id).await;
+                write_meta(&stream, &session_id, started, Some(now_ms())).await;
+                return;
+            }
+        };
+        let mut stdin = child.stdin.take().expect("ffmpeg stdin");
+
+        // 打开音频管道写端（会阻塞到 ffmpeg 打开读端，放 spawn_blocking 里不占 runtime 线程）
+        let mut audio_w: Option<tokio::fs::File> = None;
+        if has_audio {
+            let p = audio_fifo.clone();
+            match tokio::task::spawn_blocking(move || {
+                std::fs::OpenOptions::new().write(true).open(&p)
+            }).await {
+                Ok(Ok(f)) => audio_w = Some(tokio::fs::File::from_std(f)),
+                other => log::warn!("打开音频管道写端失败，音频将缺失 session={session_id}: {other:?}"),
+            }
+        }
+
+        // 灌入预备阶段缓冲的视频帧
+        for data in pending_video.drain(..) {
+            if stdin.write_all(&data).await.is_err() { break; }
+        }
+
+        // ---- 主收帧循环 ----
+        let mut nv = 0u64;
+        let mut na = 0u64;
+        if !ended_in_preamble {
+            loop {
+                tokio::select! {
+                    frame = frame_rx.recv() => match frame {
+                        Some(FrameData::Video { data, .. }) => {
+                            nv += 1;
+                            if let Err(e) = stdin.write_all(&data).await {
+                                log::warn!("写视频到 ffmpeg 失败（已退出?）session={session_id}: {e}");
+                                break;
+                            }
+                        }
+                        Some(FrameData::Audio { data, .. }) => {
+                            if let Some(w) = audio_w.as_mut() {
+                                na += 1;
+                                // whip 发的是 raw AAC，加 ADTS 头再喂 ffmpeg
+                                let hdr = adts_header(data.len());
+                                if w.write_all(&hdr).await.is_err() || w.write_all(&data).await.is_err() {
+                                    log::warn!("写音频管道失败，后续只录视频 session={session_id}");
+                                    audio_w = None;
+                                }
+                            }
+                        }
+                        Some(_) => {}
+                        None => break, // 停流：所有发布者已 drop
+                    },
+                    _ = shutdown.changed() => {
+                        log::info!("收到退出信号，收尾录制 session={session_id}");
+                        break;
+                    }
                 }
             }
         }
-        log::info!("录制收帧结束 video={nv} session={session_id}");
-        // 关闭 stdin → ffmpeg 收尾写 ENDLIST，成 VOD
-        drop(stdin);
-        let _ = child.wait().await;
+        log::info!("录制收帧结束 video={nv} audio={na} session={session_id}");
 
-        let ended = now_ms();
-        {
-            let mut s = rec.write().await;
-            if let Some(sess) = s.sessions.iter_mut().find(|x| x.id == session_id) {
-                sess.live = false;
-                sess.ended_at_ms = Some(ended);
-            }
-        }
-        write_meta(&stream, &session_id, started, Some(ended)).await;
+        // 关两路写端 → ffmpeg 收尾写 ENDLIST 成 VOD
+        drop(stdin);
+        drop(audio_w);
+        let _ = child.wait().await;
+        let _ = std::fs::remove_file(&audio_fifo);
+
+        mark_ended(&rec, &session_id).await;
+        write_meta(&stream, &session_id, started, Some(now_ms())).await;
         log::info!("⏹ 录制结束 session={session_id}");
     });
     tasks.lock().await.push(handle);

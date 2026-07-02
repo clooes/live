@@ -91,12 +91,14 @@ fn quality_args(quality: &str) -> Vec<String> {
 }
 
 /// 从 session 的 HLS 裁出 [start_ms, end_ms] → output(mp4)，按 `quality` 直拷或重编码。
+/// `with_audio=false` 时加 `-an` 去掉音频（R10 下载「无声」版）。
 pub async fn clip_session(
     session_dir: &Path,
     start_ms: u64,
     end_ms: u64,
     output: &Path,
     quality: &str,
+    with_audio: bool,
 ) -> anyhow::Result<()> {
     if end_ms <= start_ms {
         anyhow::bail!("结束时间需晚于开始时间");
@@ -134,11 +136,15 @@ pub async fn clip_session(
     }
 
     // concat + 输出侧 seek（-ss 在 -i 后）精修；.ts 以关键帧起头，落点较准
-    let out = Command::new(crate::ffmpeg::path())
-        .args(["-y", "-f", "concat", "-safe", "0", "-i"])
+    let mut cmd = Command::new(crate::ffmpeg::path());
+    cmd.args(["-y", "-f", "concat", "-safe", "0", "-i"])
         .arg(&list_path)
         .args(["-ss", &seek.to_string(), "-t", &duration.to_string()])
-        .args(&quality_args(quality))
+        .args(&quality_args(quality));
+    if !with_audio {
+        cmd.arg("-an"); // 无声版：丢弃音频轨（覆盖 quality_args 里的 -c:a aac）
+    }
+    let out = cmd
         .args(["-avoid_negative_ts", "make_zero"])
         .arg(output)
         .stdout(Stdio::null())
@@ -155,13 +161,14 @@ pub async fn clip_session(
     Ok(())
 }
 
-/// 按需切片（R4：下载时选清晰度）。确保 job 区间在指定 `quality` 下的 mp4 已生成，返回 (文件名, 大小)。
-/// 同一 (job, quality) 的产物按文件名缓存，命中直接返回，不重复切。
+/// 按需切片（R4 清晰度 + R10 有声/无声）。确保 job 区间在指定 `quality`、`with_audio` 下的 mp4 已生成，
+/// 返回 (文件名, 大小)。同一 (job, quality, 音频) 的产物按文件名缓存，命中直接返回，不重复切。
 /// 由 web 层的下载准备接口调用（原画秒级直拷，720p/480p 重编码稍慢）。
 pub async fn ensure_clip(
     rec: &SharedRec,
     job_id: &str,
     quality: &str,
+    with_audio: bool,
 ) -> anyhow::Result<(String, String)> {
     // 取 job 区间 + 定位 session 目录
     let (room, session_id, start_ms, end_ms) = {
@@ -179,29 +186,30 @@ pub async fn ensure_clip(
     };
 
     let session_dir = recordings_dir(&room).join(&session_id);
-    let file_name = format!("clip_{job_id}_{quality}.mp4");
+    let aud = if with_audio { "snd" } else { "mute" }; // 音频维度进缓存文件名，有声/无声互不覆盖
+    let file_name = format!("clip_{job_id}_{quality}_{aud}.mp4");
     let output = clips_dir().join(&file_name);
 
-    // 缓存命中：已切过该清晰度，直接复用
+    // 缓存命中：已切过该 (清晰度,音频)，直接复用
     if let Ok(m) = std::fs::metadata(&output) {
         return Ok((file_name, human_size(m.len())));
     }
 
     log::info!(
-        "切片开始 job={job_id} quality={quality} session={session_id} [{start_ms}, {end_ms}] ({}s)",
+        "切片开始 job={job_id} quality={quality} audio={aud} session={session_id} [{start_ms}, {end_ms}] ({}s)",
         (end_ms - start_ms) as f64 / 1000.0
     );
     // 有限重试：刚开录时目标分片可能尚未落盘（m3u8 未写/区间太新），等待后重试；切片幂等（输出覆盖）
-    let mut r = clip_session(&session_dir, start_ms, end_ms, &output, quality).await;
+    let mut r = clip_session(&session_dir, start_ms, end_ms, &output, quality, with_audio).await;
     let mut tries = 0;
     while r.is_err() && tries < 8 {
         tries += 1;
         sleep(Duration::from_millis(500)).await;
-        r = clip_session(&session_dir, start_ms, end_ms, &output, quality).await;
+        r = clip_session(&session_dir, start_ms, end_ms, &output, quality, with_audio).await;
     }
     r?;
 
     let size = std::fs::metadata(&output).map(|m| human_size(m.len())).unwrap_or_default();
-    log::info!(target: "user_ops", "切片完成可下载 job={job_id} quality={quality} file={file_name} size={size}");
+    log::info!(target: "user_ops", "切片完成可下载 job={job_id} quality={quality} audio={aud} file={file_name} size={size}");
     Ok((file_name, size))
 }

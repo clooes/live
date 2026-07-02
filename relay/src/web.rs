@@ -31,10 +31,11 @@ use crate::clip;
 use crate::config::{self, RelayConfig, SharedConfig};
 use crate::record::{now_ms, ClipJob, ClipMark, SharedRec};
 
-/// 下载准备接口的查询参数：?quality=original|720p|480p（缺省 original）。
+/// 下载准备接口的查询参数：?quality=original|720p|480p（缺省 original）&audio=on|off（缺省 on）。
 #[derive(serde::Deserialize)]
 struct PrepareQuery {
     quality: Option<String>,
+    audio: Option<String>,
 }
 
 /// web 层共享状态：当前配置 + 配置变更广播通道 + 录制/切片状态。
@@ -151,11 +152,12 @@ async fn clip_prepare(
     if !st.cfg.read().await.qualities.iter().any(|x| x.name == quality) {
         return Err((StatusCode::BAD_REQUEST, format!("未知清晰度 {quality}")));
     }
-    let (file, size) = clip::ensure_clip(&st.rec, &id, &quality)
+    let with_audio = q.audio.as_deref() != Some("off"); // 缺省有声；仅 audio=off 时无声
+    let (file, size) = clip::ensure_clip(&st.rec, &id, &quality, with_audio)
         .await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    log::info!(target: "user_ops", "下载准备 job={id} quality={quality} file={file}");
-    Ok(Json(json!({ "file": file, "size": size, "quality": quality })))
+    log::info!(target: "user_ops", "下载准备 job={id} quality={quality} audio={} file={file}", if with_audio { "on" } else { "off" });
+    Ok(Json(json!({ "file": file, "size": size, "quality": quality, "audio": with_audio })))
 }
 
 /// 查询单个切片 job 进度。

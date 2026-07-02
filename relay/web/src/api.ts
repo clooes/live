@@ -84,9 +84,16 @@ export async function clipEnd(): Promise<ClipJob> {
   return r.json()
 }
 
-/// 下载准备（R4）：按 job + 清晰度按需切片，返回可下载文件名/大小。original 秒级，720p/480p 重编码稍慢。
-export async function prepareClip(id: string, quality: string): Promise<{ file: string; size: string; quality: string }> {
-  const r = await fetch(`/api/clip/prepare/${id}?quality=${encodeURIComponent(quality)}`, { method: 'POST' })
+/// 下载准备（R4 清晰度 + R10 有声/无声）：按 job + 清晰度 + 音频按需切片，返回可下载文件名/大小。
+/// original 秒级，720p/480p 重编码稍慢；audio=false 生成无声版（-an）。
+export async function prepareClip(
+  id: string, quality: string, withAudio: boolean,
+): Promise<{ file: string; size: string; quality: string; audio: boolean }> {
+  const audio = withAudio ? 'on' : 'off'
+  const r = await fetch(
+    `/api/clip/prepare/${id}?quality=${encodeURIComponent(quality)}&audio=${audio}`,
+    { method: 'POST' },
+  )
   if (!r.ok) throw new Error(await r.text())
   return r.json()
 }

@@ -105,3 +105,7 @@ button.primary:disabled { opacity: .6; cursor: default; }
 /* 片段清晰度下载按钮组 */
 .clip-dl { display: inline-flex; gap: 6px; align-items: center; flex-wrap: wrap; }
 .clip-dl button { padding: 3px 10px; font-size: 12px; }
+/* R10：有声/无声两行清晰度下载 */
+.clip-dl { display: inline-flex; flex-direction: column; gap: 6px; align-items: flex-start; }
+.clip-dl-row { display: inline-flex; gap: 6px; align-items: center; }
+.clip-dl-label { color: #9aa0aa; font-size: 12px; width: 32px; }

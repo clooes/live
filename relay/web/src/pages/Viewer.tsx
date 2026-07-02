@@ -222,16 +222,18 @@ function Library() {
   )
 }
 
-/// 单个片段的清晰度下载（R4）：每个清晰度一个按钮，点击后按需切片（original 秒级 / 720p·480p 重编码），
-/// 就绪即触发浏览器下载。同一清晰度切好后服务端缓存，再点即秒下。
+/// 单个片段的下载（R4 清晰度 + R10 有声/无声）：清晰度 × {有声,无声} = 6 个入口。
+/// 点击后按需切片（original 秒级 / 720p·480p 重编码；无声版 -an），就绪即触发浏览器下载。
+/// 同一 (清晰度,音频) 切好后服务端缓存，再点即秒下。
 function ClipDownload({ clip, qualities }: { clip: ClipJob; qualities: Quality[] }) {
-  const [busy, setBusy] = useState('') // 正在准备的清晰度名
+  const [busy, setBusy] = useState('') // 正在准备的 key（quality+音频）
   const [err, setErr] = useState('')
 
-  async function onPick(q: string) {
-    setErr(''); setBusy(q)
+  async function onPick(q: string, withAudio: boolean) {
+    const key = q + (withAudio ? '·snd' : '·mute')
+    setErr(''); setBusy(key)
     try {
-      const { file } = await prepareClip(clip.id, q)
+      const { file } = await prepareClip(clip.id, q, withAudio)
       // 触发下载（download 属性 + 程序化点击）
       const a = document.createElement('a')
       a.href = clipUrl(file); a.download = ''
@@ -245,10 +247,18 @@ function ClipDownload({ clip, qualities }: { clip: ClipJob; qualities: Quality[]
 
   return (
     <span className="clip-dl">
-      {qualities.map((q) => (
-        <button key={q.name} onClick={() => onPick(q.name)} disabled={!!busy}>
-          {busy === q.name ? '生成中…' : q.name}
-        </button>
+      {([[true, '有声'], [false, '无声']] as const).map(([withAudio, label]) => (
+        <span key={label} className="clip-dl-row">
+          <span className="clip-dl-label">{label}</span>
+          {qualities.map((q) => {
+            const key = q.name + (withAudio ? '·snd' : '·mute')
+            return (
+              <button key={key} onClick={() => onPick(q.name, withAudio)} disabled={!!busy}>
+                {busy === key ? '生成中…' : q.name}
+              </button>
+            )
+          })}
+        </span>
       ))}
       {err && <span className="rec-err">{err}</span>}
     </span>
