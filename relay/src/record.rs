@@ -345,9 +345,11 @@ async fn record_task(
                 frame = frame_rx.recv() => match frame {
                     Some(FrameData::Video { data, .. }) => {
                         nv += 1;
-                        if stdin.write_all(&data).await.is_err() {
-                            log::warn!("写视频到 ffmpeg 失败（已退出?）id={id}");
-                            break;
+                        // 写视频加超时：ffmpeg 若卡住不读 stdin，不至于永久阻塞主循环、收不到停止。
+                        match tokio::time::timeout(Duration::from_secs(3), stdin.write_all(&data)).await {
+                            Ok(Ok(())) => {}
+                            Ok(Err(e)) => { log::warn!("写视频失败（ffmpeg 已退出?）id={id}: {e}"); break; }
+                            Err(_) => { log::warn!("写视频超时 3s，ffmpeg 疑似卡住，结束录制 id={id}"); break; }
                         }
                     }
                     Some(FrameData::Audio { data, .. }) => {
