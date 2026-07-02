@@ -39,8 +39,14 @@ pub fn init(data_root: &Path) -> Vec<WorkerGuard> {
         tracing_appender::rolling::daily(&logs_dir, "viewers.log"),
     );
 
-    // 全局级别过滤（RUST_LOG，缺省 info）
-    let env = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    // 全局级别过滤（RUST_LOG，缺省 info）。压掉 WebRTC 底层库的刷屏日志——
+    // 尤其 webrtc_ice 在 ICE 尚未配对候选时每 ~200ms 刷一条
+    // "pingAllCandidates called with no candidate pairs" WARN，纯噪音，降到 error。
+    let env = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        EnvFilter::new(
+            "info,webrtc_ice=error,webrtc=warn,webrtc_dtls=error,webrtc_sctp=error,webrtc_srtp=error",
+        )
+    });
 
     // 控制台：全量，保留彩色（TTY 下）
     let console = fmt::layer().with_writer(std::io::stderr);
