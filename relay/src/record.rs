@@ -228,12 +228,17 @@ pub async fn start_recording(
 }
 
 /// 点「停止录制」：发停止信号给对应任务，任务收尾写完 mp4。
+/// 幂等：若该录制已自然结束（流断/已收尾），只要它在列表里就当作已停止、返回成功，不报错。
 pub async fn stop_recording(rec: &SharedRec, id: &str) -> Result<(), String> {
-    let stop = rec.write().await.stops.remove(id);
-    match stop {
-        Some(tx) => { let _ = tx.send(()); Ok(()) }
-        None => Err("无此进行中的录制（可能已结束）".into()),
+    let mut s = rec.write().await;
+    if let Some(tx) = s.stops.remove(id) {
+        let _ = tx.send(());
+        return Ok(());
     }
+    if s.recordings.iter().any(|r| r.id == id) {
+        return Ok(()); // 已结束（流断/收尾完成），幂等成功
+    }
+    Err("无此录制".into())
 }
 
 /// 录制任务：探测有无音频 → 起 ffmpeg（视频 stdin + 可选音频 fifo）录 mp4 → 收尾标记 done/error。
