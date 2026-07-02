@@ -279,6 +279,8 @@ async fn start_session(
         let mut cmd = Command::new(crate::ffmpeg::path());
         cmd.args(["-hide_banner", "-loglevel", "warning"])
             .args(["-analyzeduration", "10000000", "-probesize", "10000000"])
+            // -thread_queue_size：多输入 mux 时给每路足够队列，避免一路读取阻塞另一路
+            .args(["-thread_queue_size", "512"])
             .args(["-use_wallclock_as_timestamps", "1"])
             .args(["-f", "h264", "-i", "pipe:0"]);
         if has_audio {
@@ -297,7 +299,8 @@ async fn start_session(
             }
             if has_audio {
                 // 音频第二路也按墙钟打时间戳，与视频近似同步（D13：先墙钟近似）
-                cmd.args(["-use_wallclock_as_timestamps", "1"])
+                cmd.args(["-thread_queue_size", "512"])
+                    .args(["-use_wallclock_as_timestamps", "1"])
                     .args(["-f", "aac", "-i"]).arg(&audio_fifo);
             }
         }
@@ -329,15 +332,15 @@ async fn start_session(
         };
         let mut stdin = child.stdin.take().expect("ffmpeg stdin");
 
-        // 打开音频管道写端（会阻塞到 ffmpeg 打开读端，放 spawn_blocking 里不占 runtime 线程）
+        // 打开音频管道写端。关键：用 O_RDWR（read+write）打开，避免只写打开阻塞——
+        // ffmpeg 是顺序探测输入的（先探视频 pipe:0，探完才开音频 fifo 读端），
+        // 若这里阻塞等 ffmpeg 开读端，而 ffmpeg 又在等视频数据才探完视频，就会死锁、HLS 永不产出。
+        // O_RDWR 打开命名管道不阻塞（自身即读端），relay 得以立刻喂视频、打破死锁。
         let mut audio_w: Option<tokio::fs::File> = None;
         if has_audio {
-            let p = audio_fifo.clone();
-            match tokio::task::spawn_blocking(move || {
-                std::fs::OpenOptions::new().write(true).open(&p)
-            }).await {
-                Ok(Ok(f)) => audio_w = Some(tokio::fs::File::from_std(f)),
-                other => log::warn!("打开音频管道写端失败，音频将缺失 session={session_id}: {other:?}"),
+            match std::fs::OpenOptions::new().read(true).write(true).open(&audio_fifo) {
+                Ok(f) => audio_w = Some(tokio::fs::File::from_std(f)),
+                Err(e) => log::warn!("打开音频管道失败，音频将缺失 session={session_id}: {e}"),
             }
         }
 
