@@ -102,6 +102,14 @@
 | D14 | R10 无音频推流降级 | ✅ 静默出片（探测+缓冲：录制开头最多等 1.5s 探测有无音频，无则退回纯视频单路，避免 ffmpeg 空等音频卡死） |
 | D15 | R10 平台范围 | ✅ 先 mac/Linux（命名管道 mkfifo）；Windows 命名管道兼容后续单列 |
 | D16 | R10 回放是否有声 | ✅ 回放也有声（补音频作用于录制 HLS，回放/下载均自然受益） |
+| D17 | 录制机制（取代 R3回放/R4/R10） | ✅ 点击即分段录成品 mp4，弃用「全程录 HLS + 按墙钟 PDT 裁剪」（时间轴对齐脆弱、反复报 m3u8/区间错） |
+| D18 | 清晰度选择时机 | ✅ **录制时**选清晰度（起 ffmpeg 即按档编码），取代 R4「下载时选 + 按需切片」 |
+| D19 | 整场回放 + 音频形态 | ✅ 去掉整场回放；录制**直接有声**（`-c:a copy`），取消无声/6 选项（取代 R3 整场回放、R10 有声无声） |
+
+> ⚠️ **录制架构重构（2026-07-02，commit 328253c）**：R3 整场回放、R4 下载选清晰度、R10 补音频+6选项
+> 这三条的实现已被**分段录制**取代（见批次 8）。旧条目/决策（D2/D3/D7/D11/D13/D14/D16 等）作为历史保留，
+> 但当前代码不再走那套。核心变化：录制 = 点击起独立 ffmpeg 按选定清晰度录成品 mp4（有声），
+> 停止即就绪直接下载；不再有 HLS 全程录制、墙钟裁剪、下载转码、整场回放。
 
 > 实现补充：
 > - R8 端口属**启动期配置**，改 config.json 的 ports 后**需重启**（不像 room/清晰度 SSE 热更新）。
@@ -121,24 +129,27 @@
 - [x] R5-b 文件日志（tracing + 按天滚动，按 log target 分类 system/user-ops/viewers → data_root/logs，控制台保留全量）
 - [x] R6 二维码弹窗（/api/lan-ip 返回内网 IP + web 端口；前端 qrcode.react 分享按钮弹窗）
 
-### 批次 3 · 单页面重构 + 回放 ✅ 已完成
-- [x] R2 砍管理/录制页 → 单页（录制条+片段/回放并入观看页，去 hash 路由；删 Admin/Recordings.tsx；后端删 POST /api/config 写接口，配置纯看 config.json — D6）
-- [x] R3 回放修正（Library 只列已结束场次 `!r.live`，回放走单页内弹窗独立 HLS VOD 播放器，与直播 WHEP video 完全解耦；根因=旧代码对 live playlist 追尾、观感等同直播 — D2/D7）
+### 批次 3 · 单页面重构 + 回放 ✅ 已完成（R3 回放部分已被批次 8 取代）
+- [x] R2 砍管理/录制页 → 单页（录制条+片段并入观看页，去 hash 路由；删 Admin/Recordings.tsx；后端删 POST /api/config 写接口，配置纯看 config.json — D6）
+- [x] ~~R3 回放修正（HLS VOD 弹窗）~~ → **整场回放已在批次 8 去掉**（D19），此项作废
 
-### 批次 4 · 录制体验 ✅ 已完成
-- [x] R4 下载时选清晰度：结束录制只登记区间（不预切）；下载时按 quality 切片——
-  `original`=`-c copy` 秒级、`720p/480p`=`scale=-2:N + libx264 crf23` 重编码；
-  同 (job,quality) 产物磁盘缓存复用。接口 `POST /api/clip/prepare/:id?quality=`，前端片段行清晰度按钮组。
+### 批次 4 · 录制体验 ✅ 已完成（已被批次 8 取代）
+- [x] ~~R4 下载时选清晰度（下载时按需切片/转码）~~ → **改为录制时选清晰度**（D18，批次 8），旧的下载切片/prepare 接口已删
 
 ### 批次 5 · 多用户隔离 ⏸ 本阶段推迟
 - [ ] ~~R7 client_id 身份 + mark/jobs per-client + 状态恢复 + 片段隔离~~（推迟到下一阶段）
 
-### 批次 6 · 录制补音频 + 下载有声/无声（R10 · 决策 D13~D16 已定）🚧 代码完成，待 OBS 带麦实测
-- [x] R10 录制补音频（record 探测+缓冲有无音频 → 有则 mkfifo 音频管道 + ffmpeg 双路(视频 stdin + AAC/ADTS fifo)混音轨 HLS；无则退回纯视频。ADTS 头硬编码 48k/2ch/LC，跳过首个 ASC 帧。优雅退出关两端）
-- [x] R10 下载 6 选项（clip.rs 无声版 `-an` + 缓存名加 snd/mute 维度；web.rs prepare 加 `audio=on|off`；前端 ClipDownload 有声/无声两行×3 清晰度）
-- 已离线验证：`-an` 无声/有声产物音轨差异正确、720p 重编码带音轨正确、prepare 参数分支 400/500 正确；**编译全绿**
-- ⚠️ 待真机验证（我无法用 OBS 推流测）：① 音画同步是否漂移（D13 墙钟近似）② 有音频时 fifo 双路混流实际出片 ③ 无麦推流降级不卡死（D14）④ ADTS 封装能被正确解码
-- 备注：仅 mac/Linux（D15），Windows 命名管道后续单列
+### 批次 6 · 录制补音频 + 下载有声/无声（R10）❌ 已被批次 8 取代
+- [x] ~~R10 全程 HLS 补音频 + 下载 6 选项~~ → 分段录制天然带音频（`-c:a copy`）、直接有声、不做无声/6 选项（D19，批次 8）
+- 说明：R10 那套「全程 HLS 双路 + 墙钟裁剪」实测反复出问题（fifo 死锁、DTS 非单调致 HLS 时间轴崩坏、切片区间选不到），故整体重构为分段录制
+
+### 批次 8 · 录制架构重构（分段录制成品 mp4）✅ 已完成（commit 328253c）
+- [x] 点击即分段录制：`spawn_monitor` 维护当前活跃流；`start_recording` 订阅流 + 按选定清晰度起 ffmpeg（视频 pipe + 音频 fifo/ADTS 双路）**直接录成品 mp4**（`-movflags +faststart`，有声 `-c:a copy`）；`stop_recording` 发信号收尾写 moov（D17/D18/D19）
+- [x] 接口：`/api/record/{state,start,stop}` + `/api/records`；WebState 加 hub/shutdown/tasks；**删 clip.rs** 及切片/整场回放/prepare 全部接口
+- [x] 前端：录制条 = 清晰度下拉 + 开始/停止；片段列表直接下载 mp4（进行中状态由后端派生，刷新页可续上并停止）；去掉整场回放/6 选项/HlsPlayer/hls.js
+- 冒烟：state/records/start(409 无流 / 400 未知清晰度) 均正确，**编译全绿**（净删 400+ 行）
+- ⚠️ 待真机（OBS 带麦）验证：实际录制 mp4 出片 + 音画同步（双路 wallclock 近似，D13 仍适用）
+- 备注：音频仅 mac/Linux（mkfifo）；Windows 后续单列
 
 ### 批次 7 · 下载水印（R9 · 待排期，决策 D8~D10 已定）
 - [ ] R9 下载片段加图片水印（config.watermark + clip.rs filter_complex overlay + 缓存 key 含水印 + 容错回退）
