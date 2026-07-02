@@ -103,6 +103,7 @@ function RecordPanel() {
   const [records, setRecords] = useState<RecordItem[]>([])
   const [live, setLive] = useState(false)
   const [now, setNow] = useState(Date.now())
+  const [stoppingId, setStoppingId] = useState<string | null>(null) // 已点停止、等后端收尾
   const [err, setErr] = useState('')
 
   // 清晰度档来自 config.json，拉一次
@@ -127,8 +128,17 @@ function RecordPanel() {
     return () => { clearInterval(t); clearInterval(tick) }
   }, [])
 
-  // 进行中的录制由后端列表派生，刷新页面也能续上
-  const active = records.find((r) => r.status === 'recording')
+  // 收尾完成（该 id 不再处于 recording）后清掉「收尾中」标记
+  useEffect(() => {
+    if (stoppingId && !records.some((r) => r.id === stoppingId && r.status === 'recording')) {
+      setStoppingId(null)
+    }
+  }, [records, stoppingId])
+
+  // 进行中的录制由后端列表派生，刷新页面也能续上；已点停止的排除（等收尾）
+  const recording = records.find((r) => r.status === 'recording')
+  const active = recording && recording.id !== stoppingId ? recording : undefined
+  const finalizing = !!recording && recording.id === stoppingId // 收尾中
 
   async function onStart() {
     setErr('')
@@ -138,15 +148,22 @@ function RecordPanel() {
     } catch (e) { setErr(String(e)) }
   }
   async function onStop(id: string) {
-    setErr('')
-    try { await recordStop(id); refresh() } catch (e) { setErr(String(e)) }
+    setErr(''); setStoppingId(id) // 立即隐藏停止按钮、显示收尾中
+    try { await recordStop(id) } catch (e) { setErr(String(e)) }
+    refresh()
   }
 
   return (
     <div className="recbar-wrap">
       <div className="recbar">
         <span className="rec-title">录制</span>
-        {!active ? (
+        {active ? (
+          <button onClick={() => onStop(active.id)}>
+            ■ 停止录制（{Math.max(0, Math.floor((now - active.started_at_ms) / 1000))}s · {active.quality}）
+          </button>
+        ) : finalizing ? (
+          <span className="muted">收尾中…（正在写完 mp4）</span>
+        ) : (
           <>
             <select className="qsel" value={quality} disabled={!live}
               onChange={(e) => setQuality(e.target.value)}>
@@ -156,10 +173,6 @@ function RecordPanel() {
               title={live ? '' : '无直播流，开播后可录'}>● 开始录制</button>
             {!live && <span className="muted">无直播流</span>}
           </>
-        ) : (
-          <button onClick={() => onStop(active.id)}>
-            ■ 停止录制（{Math.max(0, Math.floor((now - active.started_at_ms) / 1000))}s · {active.quality}）
-          </button>
         )}
         {err && <span className="rec-err">{err}</span>}
       </div>

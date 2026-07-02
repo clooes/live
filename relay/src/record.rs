@@ -368,10 +368,18 @@ async fn record_task(
     }
     log::info!("录制收帧结束 video={nv} audio={na} id={id}");
 
-    // 关两路写端 → ffmpeg EOF 收尾写 moov
+    // 关两路写端 → ffmpeg EOF 收尾写 moov。加超时强杀兜底：
+    // 流异常时 ffmpeg 可能不自行退出，若不兜底任务会永久卡在这、状态一直「录制中」。
     drop(stdin);
     drop(audio_w);
-    let _ = child.wait().await;
+    match tokio::time::timeout(Duration::from_secs(10), child.wait()).await {
+        Ok(_) => {}
+        Err(_) => {
+            log::warn!("ffmpeg 收尾超时(10s)，强制结束 id={id}");
+            let _ = child.start_kill();
+            let _ = tokio::time::timeout(Duration::from_secs(3), child.wait()).await;
+        }
+    }
     let _ = std::fs::remove_file(&audio_fifo);
 
     let result = if nv == 0 {
