@@ -247,7 +247,6 @@ async fn start_session(
         // 避免给 ffmpeg 挂一路「永远没数据的音频输入」导致它空等卡死（D14 静默出片的前提）。
         const PREAMBLE_MS: u64 = 1500;
         let preamble_start = now_ms();
-        let mut pending_video = Vec::new();
         let mut has_audio = false;
         let mut ended_in_preamble = false;
         loop {
@@ -258,7 +257,10 @@ async fn start_session(
             let remaining = Duration::from_millis(PREAMBLE_MS - elapsed);
             tokio::select! {
                 frame = frame_rx.recv() => match frame {
-                    Some(FrameData::Video { data, .. }) => pending_video.push(data),
+                    // 探测期视频「直接丢弃」不缓冲：若缓冲后再一次性 flush，wallclock 会把这批帧挤成
+                    // 同一时刻 → DTS 非单调 → HLS 时间轴错乱、切片按 PDT 墙钟对齐会选不到片。
+                    // 音频通常与视频同时到达，故丢弃的开头极短（<探测时长），可接受。
+                    Some(FrameData::Video { .. }) => {}
                     // 首个音频帧是 AAC 配置头(ASC)，丢弃即可（ADTS 自带配置）；见到即判定有音频
                     Some(FrameData::Audio { .. }) => { has_audio = true; break; }
                     Some(_) => {}
@@ -268,10 +270,7 @@ async fn start_session(
                 _ = tokio::time::sleep(remaining) => break,
             }
         }
-        log::info!(
-            "录制探测完成 session={session_id} 音频={} 预备缓冲视频帧={}",
-            if has_audio { "有" } else { "无" }, pending_video.len()
-        );
+        log::info!("录制探测完成 session={session_id} 音频={}", if has_audio { "有" } else { "无" });
 
         // ---- 据探测结果拉起 ffmpeg：有音频=视频(stdin)+音频(fifo)双路；无音频=纯视频单路 ----
         let audio_fifo = dir.join("audio.aac");
@@ -344,12 +343,7 @@ async fn start_session(
             }
         }
 
-        // 灌入预备阶段缓冲的视频帧
-        for data in pending_video.drain(..) {
-            if stdin.write_all(&data).await.is_err() { break; }
-        }
-
-        // ---- 主收帧循环 ----
+        // ---- 主收帧循环（视频从此刻实时喂，wallclock 单调，不再有 flush 突变）----
         let mut nv = 0u64;
         let mut na = 0u64;
         if !ended_in_preamble {
