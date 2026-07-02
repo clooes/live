@@ -282,8 +282,10 @@ async fn record_task(
     // ---- 拉起 ffmpeg：视频 pipe + 可选音频 fifo，按清晰度编码，输出成品 mp4 ----
     let ff_log = std::fs::File::create(dir.join(format!("ffmpeg_{id}.log"))).ok();
     let mut cmd = Command::new(crate::ffmpeg::path());
+    // analyzeduration/probesize 取小值：让 ffmpeg 尽快探测完视频、开始读音频 fifo，
+    // 否则探测期不读音频 → fifo 缓冲(64KB)写满 → relay 写音频阻塞、主循环卡死收不到停止。
     cmd.args(["-hide_banner", "-loglevel", "warning"])
-        .args(["-analyzeduration", "10000000", "-probesize", "10000000"])
+        .args(["-analyzeduration", "1000000", "-probesize", "1000000"])
         .args(["-thread_queue_size", "512"])
         .args(["-use_wallclock_as_timestamps", "1"])
         .args(["-f", "h264", "-i", "pipe:0"]);
@@ -352,9 +354,19 @@ async fn record_task(
                         if let Some(w) = audio_w.as_mut() {
                             na += 1;
                             let hdr = adts_header(data.len());
-                            if w.write_all(&hdr).await.is_err() || w.write_all(&data).await.is_err() {
-                                log::warn!("写音频管道失败，后续只录视频 id={id}");
-                                audio_w = None;
+                            // 音频写超时保护：ffmpeg 若一时没读音频（探测/卡顿），fifo 满不至于
+                            // 永久阻塞主循环、收不到停止；超时则丢弃该帧继续（正常不触发）。
+                            let write = async {
+                                w.write_all(&hdr).await?;
+                                w.write_all(&data).await
+                            };
+                            match tokio::time::timeout(Duration::from_millis(800), write).await {
+                                Ok(Ok(())) => {}
+                                Ok(Err(_)) => {
+                                    log::warn!("写音频管道失败，后续只录视频 id={id}");
+                                    audio_w = None;
+                                }
+                                Err(_) => { /* 超时：丢弃该音频帧，避免卡死 */ }
                             }
                         }
                     }
