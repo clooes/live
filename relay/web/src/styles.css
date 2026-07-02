@@ -109,3 +109,9 @@ button.primary:disabled { opacity: .6; cursor: default; }
 .clip-dl { display: inline-flex; flex-direction: column; gap: 6px; align-items: flex-start; }
 .clip-dl-row { display: inline-flex; gap: 6px; align-items: center; }
 .clip-dl-label { color: #9aa0aa; font-size: 12px; width: 32px; }
+
+/* 分段录制面板 */
+.recbar-wrap { margin-top: 16px; }
+.rec-h { margin: 20px 0 10px; font-size: 15px; }
+.qsel { background: #2a2d36; color: #e8e8ea; border: 1px solid #3a3d47; padding: 6px 10px; border-radius: 6px; }
+.rec-live { color: #e5484d; }

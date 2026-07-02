@@ -7,7 +7,6 @@
 //! 媒体路由由 streamhub 撮合。第 0 步已验证 WHIP→WHEP H.264 直通链路。
 
 mod banner;
-mod clip;
 mod config;
 mod ffmpeg;
 mod logging;
@@ -56,20 +55,14 @@ async fn main() {
         ffmpeg::path().display()
     );
 
-    // 优雅退出：收到信号时广播 shutdown，录制 task 据此收尾（写完 ENDLIST）；tasks 收集其句柄供等待
+    // 优雅退出：收到信号时广播 shutdown，进行中的录制据此收尾（写完 mp4 moov）；tasks 收集句柄供等待
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let rec_tasks: record::RecTasks = Arc::new(tokio::sync::Mutex::new(Vec::new()));
 
-    // 录制管理器：监听 client-event，目标房间开播即自动全程录制
+    // 直播流监听：维护「当前活跃流」，供「点击录制」时判断能否录 + 订阅（不再自动全程录制）
     let rec: record::SharedRec = Arc::new(RwLock::new(record::RecStore::default()));
-    record::spawn(
-        stream_hub.get_hub_event_sender(),
-        stream_hub.get_client_event_consumer(),
-        rec.clone(),
-        room,
-        shutdown_rx,
-        rec_tasks.clone(),
-    );
+    record::spawn_monitor(stream_hub.get_client_event_consumer(), rec.clone(), room);
+    let hub_sender = stream_hub.get_hub_event_sender();
 
     // RTMP 接收端（可选保留）
     let mut rtmp_server = RtmpServer::new(
@@ -99,11 +92,14 @@ async fn main() {
     log::info!("WHIP 推流 http://{whep_addr}/whip?app=live&stream=<key>");
     log::info!("WHEP 播放 http://{whep_addr}/whep?app=live&stream=<key>");
 
-    // 内网页面 + 配置接口（axum :8000）
+    // 内网页面 + 配置接口 + 录制接口（axum :8000）
     let web_app = web::router(web::WebState {
         cfg: cfg.clone(),
         tx: cfg_tx.clone(),
         rec: rec.clone(),
+        hub: hub_sender,
+        shutdown: shutdown_rx,
+        tasks: rec_tasks.clone(),
     });
     tokio::spawn(async move {
         match tokio::net::TcpListener::bind(&web_addr).await {

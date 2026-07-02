@@ -47,76 +47,55 @@ export function whepUrl(room: string, webrtcPort: number): string {
   return `http://${location.hostname}:${webrtcPort}/whep?app=live&stream=${encodeURIComponent(room)}`
 }
 
-// ---------- 录制 / 切片 ----------
+// ---------- 分段录制（点击录制即录成品 mp4）----------
 
-export interface ClipJob {
+export interface RecordItem {
   id: string
-  session_id: string
-  start_ms: number
-  end_ms: number
-  status: 'processing' | 'done' | 'error'
+  quality: string
+  status: 'recording' | 'done' | 'error'
   file: string | null
   size: string | null
   error: string | null
-  created_at_ms: number
-}
-
-export interface Recording {
-  id: string
-  room: string
   started_at_ms: number
   ended_at_ms: number | null
-  live: boolean
-  playlist: string
 }
 
-/// 标记「开始录制」，返回 session_id + start_ms。
-export async function clipStart(): Promise<{ session_id: string; start_ms: number }> {
-  const r = await fetch('/api/clip/start', { method: 'POST' })
+/// 录制状态：当前是否有直播流可录 + 是否有进行中的录制。
+export async function recordState(): Promise<{ live: boolean; recording: boolean }> {
+  const r = await fetch('/api/record/state')
+  if (!r.ok) throw new Error('读取录制状态失败')
+  return r.json()
+}
+
+/// 开始录制（选清晰度），返回录制 id。
+export async function recordStart(quality: string): Promise<{ id: string }> {
+  const r = await fetch('/api/record/start', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ quality }),
+  })
   if (!r.ok) throw new Error(await r.text())
   return r.json()
 }
 
-/// 标记「结束录制」，建切片任务，返回 job。
-export async function clipEnd(): Promise<ClipJob> {
-  const r = await fetch('/api/clip/end', { method: 'POST' })
+/// 停止录制。
+export async function recordStop(id: string): Promise<void> {
+  const r = await fetch('/api/record/stop', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id }),
+  })
   if (!r.ok) throw new Error(await r.text())
-  return r.json()
 }
 
-/// 下载准备（R4 清晰度 + R10 有声/无声）：按 job + 清晰度 + 音频按需切片，返回可下载文件名/大小。
-/// original 秒级，720p/480p 重编码稍慢；audio=false 生成无声版（-an）。
-export async function prepareClip(
-  id: string, quality: string, withAudio: boolean,
-): Promise<{ file: string; size: string; quality: string; audio: boolean }> {
-  const audio = withAudio ? 'on' : 'off'
-  const r = await fetch(
-    `/api/clip/prepare/${id}?quality=${encodeURIComponent(quality)}&audio=${audio}`,
-    { method: 'POST' },
-  )
-  if (!r.ok) throw new Error(await r.text())
-  return r.json()
-}
-
-export async function clipStatus(id: string): Promise<ClipJob> {
-  const r = await fetch('/api/clip/status/' + id)
-  if (!r.ok) throw new Error('查询切片失败 ' + r.status)
-  return r.json()
-}
-
-export async function listClips(): Promise<ClipJob[]> {
-  const r = await fetch('/api/clips')
-  if (!r.ok) throw new Error('读取切片列表失败')
-  return r.json()
-}
-
-export async function listRecordings(): Promise<Recording[]> {
-  const r = await fetch('/api/recordings')
+/// 录制片段列表（最新在前）。
+export async function listRecords(): Promise<RecordItem[]> {
+  const r = await fetch('/api/records')
   if (!r.ok) throw new Error('读取录制列表失败')
   return r.json()
 }
 
-/// 切片下载地址。
+/// 录制片段下载地址。
 export function clipUrl(file: string): string {
   return '/clips/' + file
 }

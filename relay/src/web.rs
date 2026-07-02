@@ -9,7 +9,7 @@
 use std::convert::Infallible;
 
 use axum::{
-    extract::{Path, Query, Request, State},
+    extract::{Request, State},
     http::{header, Method, StatusCode, Uri},
     middleware::{self, Next},
     response::{
@@ -27,23 +27,33 @@ use tokio_stream::{wrappers::BroadcastStream, StreamExt};
 use tower_http::cors::CorsLayer;
 use tower_http::services::ServeDir;
 
-use crate::clip;
-use crate::config::{self, RelayConfig, SharedConfig};
-use crate::record::{now_ms, ClipJob, ClipMark, SharedRec};
+use streamhub::define::StreamHubEventSender;
+use tokio::sync::watch;
 
-/// 下载准备接口的查询参数：?quality=original|720p|480p（缺省 original）&audio=on|off（缺省 on）。
+use crate::config::{RelayConfig, SharedConfig};
+use crate::record::{self, RecTasks, Recording, SharedRec};
+
+/// 「开始录制」请求体：选清晰度（缺省用 default_quality）。
 #[derive(serde::Deserialize)]
-struct PrepareQuery {
+struct StartBody {
     quality: Option<String>,
-    audio: Option<String>,
 }
 
-/// web 层共享状态：当前配置 + 配置变更广播通道 + 录制/切片状态。
+/// 「停止录制」请求体：录制 id。
+#[derive(serde::Deserialize)]
+struct StopBody {
+    id: String,
+}
+
+/// web 层共享状态：配置 + 配置广播 + 录制状态 + 录制所需的媒体 hub/退出信号/任务收集。
 #[derive(Clone)]
 pub struct WebState {
     pub cfg: SharedConfig,
     pub tx: broadcast::Sender<RelayConfig>,
     pub rec: SharedRec,
+    pub hub: StreamHubEventSender,
+    pub shutdown: watch::Receiver<bool>,
+    pub tasks: RecTasks,
 }
 
 /// 前端构建产物（`relay/web/dist`）编进二进制。构建前该目录须存在。
@@ -57,22 +67,18 @@ pub fn router(state: WebState) -> Router {
         .route("/api/config", get(get_config))
         .route("/api/config/stream", get(config_stream))
         .route("/api/lan-ip", get(lan_ip))
-        // 录制/切片
-        .route("/api/clip/start", post(clip_start))
-        .route("/api/clip/end", post(clip_end))
-        .route("/api/clip/prepare/:id", post(clip_prepare))
-        .route("/api/clip/status/:id", get(clip_status))
-        .route("/api/clips", get(list_clips))
-        .route("/api/recordings", get(list_recordings))
-        // 切片下载（ServeDir 自带 Range 支持）+ 下载埋点（user_ops 日志）
+        // 分段录制（点击录制即录成品 mp4）
+        .route("/api/record/state", get(record_state))
+        .route("/api/record/start", post(record_start))
+        .route("/api/record/stop", post(record_stop))
+        .route("/api/records", get(list_records))
+        // 录制片段下载（ServeDir 自带 Range 支持）+ 下载埋点（user_ops 日志）
         .nest(
             "/clips",
             Router::new()
-                .fallback_service(ServeDir::new(clip::clips_dir()))
+                .fallback_service(ServeDir::new(record::clips_dir()))
                 .layer(middleware::from_fn(log_clip_download)),
         )
-        // 整场 HLS 回放
-        .nest_service("/recordings", ServeDir::new(config::data_root().join("recordings")))
         .fallback(static_handler)
         .layer(CorsLayer::permissive())
         .with_state(state)
@@ -90,115 +96,48 @@ async fn lan_ip(State(st): State<WebState>) -> Json<serde_json::Value> {
     Json(json!({ "ip": ip, "web_port": web_port }))
 }
 
-// ---------- 录制 / 切片 ----------
+// ---------- 分段录制 ----------
 
-/// 标记「开始录制」：以当前直播 session + 当前墙钟时刻为起点。
-async fn clip_start(State(st): State<WebState>) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let mut s = st.rec.write().await;
-    let Some(sess) = s.current_session().cloned() else {
-        return Err((StatusCode::CONFLICT, "当前没有正在直播的录制".into()));
-    };
-    let mark = ClipMark { session_id: sess.id.clone(), start_ms: now_ms() };
-    log::info!(target: "user_ops", "开始录制 session={} start_ms={}", mark.session_id, mark.start_ms);
-    let resp = json!({ "ok": true, "session_id": mark.session_id, "start_ms": mark.start_ms });
-    s.mark = Some(mark);
-    Ok(Json(resp))
+/// 录制状态：当前是否有直播流可录 + 是否有进行中的录制。
+async fn record_state(State(st): State<WebState>) -> Json<serde_json::Value> {
+    let s = st.rec.read().await;
+    Json(json!({ "live": s.current.is_some(), "recording": !s.stops.is_empty() }))
 }
 
-/// 标记「结束录制」：据 [start, now] 登记一个片段区间 job（不预切）。
-/// 实际切片延到下载时按所选清晰度触发（R4），故这里只记区间、状态置 ready。
-async fn clip_end(State(st): State<WebState>) -> Result<Json<ClipJob>, (StatusCode, String)> {
-    let job = {
-        let mut s = st.rec.write().await;
-        let Some(mark) = s.mark.take() else {
-            return Err((StatusCode::CONFLICT, "尚未标记开始，请先点「开始录制」".into()));
-        };
-        let end_ms = now_ms();
-        if end_ms <= mark.start_ms {
-            return Err((StatusCode::BAD_REQUEST, "区间时长为 0".into()));
-        }
-        let id = format!("{}", now_ms());
-        let job = ClipJob {
-            id: id.clone(),
-            session_id: mark.session_id,
-            start_ms: mark.start_ms,
-            end_ms,
-            status: "ready".into(), // 区间就绪，下载时按清晰度切
-            file: None,
-            size: None,
-            error: None,
-            created_at_ms: end_ms,
-        };
-        s.jobs.insert(0, job.clone()); // 最新在前
-        job
-    };
-    log::info!(
-        target: "user_ops",
-        "结束录制 session={} 区间=[{}, {}] 片段 job={}（下载时选清晰度切片）",
-        job.session_id, job.start_ms, job.end_ms, job.id
-    );
-    Ok(Json(job))
-}
-
-/// 下载准备（R4）：按 job + 所选清晰度按需切片（缓存复用），返回可下载文件名/大小。
-/// original 直拷（秒级），720p/480p 重编码（稍慢），前端据返回 file 触发 /clips/<file> 下载。
-async fn clip_prepare(
+/// 「开始录制」：按所选清晰度当场起 ffmpeg 录成品 mp4（有声）。返回录制 id。
+async fn record_start(
     State(st): State<WebState>,
-    Path(id): Path<String>,
-    Query(q): Query<PrepareQuery>,
+    Json(body): Json<StartBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let quality = q.quality.unwrap_or_else(|| "original".into());
-    // 校验清晰度须在 config.qualities 中，避免任意 scale 参数
+    let quality = match body.quality {
+        Some(q) => q,
+        None => st.cfg.read().await.default_quality.clone(),
+    };
     if !st.cfg.read().await.qualities.iter().any(|x| x.name == quality) {
         return Err((StatusCode::BAD_REQUEST, format!("未知清晰度 {quality}")));
     }
-    let with_audio = q.audio.as_deref() != Some("off"); // 缺省有声；仅 audio=off 时无声
-    let (file, size) = clip::ensure_clip(&st.rec, &id, &quality, with_audio)
-        .await
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
-    log::info!(target: "user_ops", "下载准备 job={id} quality={quality} audio={} file={file}", if with_audio { "on" } else { "off" });
-    Ok(Json(json!({ "file": file, "size": size, "quality": quality, "audio": with_audio })))
+    let id = record::start_recording(
+        st.hub.clone(), st.rec.clone(), quality, st.shutdown.clone(), st.tasks.clone(),
+    )
+    .await
+    .map_err(|e| (StatusCode::CONFLICT, e))?;
+    Ok(Json(json!({ "id": id })))
 }
 
-/// 查询单个切片 job 进度。
-async fn clip_status(
+/// 「停止录制」：结束对应录制、写完 mp4。
+async fn record_stop(
     State(st): State<WebState>,
-    Path(id): Path<String>,
-) -> Result<Json<ClipJob>, (StatusCode, String)> {
-    let s = st.rec.read().await;
-    s.jobs
-        .iter()
-        .find(|j| j.id == id)
-        .cloned()
-        .map(Json)
-        .ok_or((StatusCode::NOT_FOUND, "无此切片任务".into()))
+    Json(body): Json<StopBody>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    record::stop_recording(&st.rec, &body.id)
+        .await
+        .map_err(|e| (StatusCode::CONFLICT, e))?;
+    Ok(Json(json!({ "ok": true })))
 }
 
-/// 切片列表（最新在前）。
-async fn list_clips(State(st): State<WebState>) -> Json<Vec<ClipJob>> {
-    Json(st.rec.read().await.jobs.clone())
-}
-
-/// 可回放的录制场次列表（最新在前）。
-async fn list_recordings(State(st): State<WebState>) -> Json<Vec<serde_json::Value>> {
-    let s = st.rec.read().await;
-    let list: Vec<serde_json::Value> = s
-        .sessions
-        .iter()
-        .rev()
-        .map(|sess| {
-            json!({
-                "id": sess.id,
-                "room": sess.room,
-                "started_at_ms": sess.started_at_ms,
-                "ended_at_ms": sess.ended_at_ms,
-                "live": sess.live,
-                // 回放地址：ServeDir 挂在 /recordings（根目录 data/recordings）
-                "playlist": format!("/recordings/{}/{}/index.m3u8", sess.room, sess.id),
-            })
-        })
-        .collect();
-    Json(list)
+/// 录制片段列表（最新在前）。
+async fn list_records(State(st): State<WebState>) -> Json<Vec<Recording>> {
+    Json(st.rec.read().await.recordings.clone())
 }
 
 /// SSE 配置流：连接即先推一份当前快照，之后每次变更实时推送。
