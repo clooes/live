@@ -509,7 +509,9 @@ async fn session_recorder(
         }
     }
     cmd.args(["-c:v", "copy"]);
-    if has_audio { cmd.args(["-c:a", "copy"]); }
+    // 音频源是带 ADTS 头的 AAC，mp4 容器要裸 AAC(ASC)，直拷须加 aac_adtstoasc 转换，
+    // 否则 muxer 报 "Malformed AAC / Operation not permitted" 把 ffmpeg 打死（音频一到即崩）。
+    if has_audio { cmd.args(["-c:a", "copy", "-bsf:a", "aac_adtstoasc"]); }
     // fragmented mp4：边写边可裁、崩溃可播（不需 faststart）
     cmd.args(["-movflags", "+frag_keyframe+empty_moov+default_base_moof"])
         .arg(&full)
