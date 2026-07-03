@@ -59,10 +59,16 @@ async fn main() {
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let rec_tasks: record::RecTasks = Arc::new(tokio::sync::Mutex::new(Vec::new()));
 
-    // 直播流监听：维护「当前活跃流」，供「点击录制」时判断能否录 + 订阅（不再自动全程录制）
+    // 直播流监听：目标 room 开播即起整场连续录制器（后台常录 full.mp4），断流即收尾。
     let rec: record::SharedRec = Arc::new(RwLock::new(record::RecStore::default()));
-    record::spawn_monitor(stream_hub.get_client_event_consumer(), rec.clone(), room);
-    let hub_sender = stream_hub.get_hub_event_sender();
+    record::spawn_monitor(
+        stream_hub.get_client_event_consumer(),
+        rec.clone(),
+        room,
+        stream_hub.get_hub_event_sender(),
+        shutdown_rx.clone(),
+        rec_tasks.clone(),
+    );
 
     // RTMP 接收端（可选保留）
     let mut rtmp_server = RtmpServer::new(
@@ -97,8 +103,6 @@ async fn main() {
         cfg: cfg.clone(),
         tx: cfg_tx.clone(),
         rec: rec.clone(),
-        hub: hub_sender,
-        shutdown: shutdown_rx,
         tasks: rec_tasks.clone(),
     });
     tokio::spawn(async move {

@@ -65,7 +65,7 @@ export interface RecordItem {
   id: string
   owner: string
   quality: string
-  status: 'recording' | 'done' | 'error'
+  status: 'recording' | 'cutting' | 'done' | 'error'
   file: string | null
   size: string | null
   error: string | null

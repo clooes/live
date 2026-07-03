@@ -136,10 +136,11 @@ function RecordPanel() {
     }
   }, [records, stoppingId])
 
-  // 进行中的录制由后端列表派生，刷新页面也能续上；已点停止的排除（等收尾）
+  // 进行中的录制由后端列表派生，刷新页面也能续上；已点停止的排除（等裁剪）
   const recording = records.find((r) => r.status === 'recording')
+  const cutting = records.find((r) => r.status === 'cutting') // 停止后台裁剪中
   const active = recording && recording.id !== stoppingId ? recording : undefined
-  const finalizing = !!recording && recording.id === stoppingId // 收尾中
+  const finalizing = (!!recording && recording.id === stoppingId) || !!cutting // 裁剪中
 
   async function onStart() {
     setErr('')
@@ -163,7 +164,7 @@ function RecordPanel() {
             ■ 停止录制（{Math.max(0, Math.floor((now - active.started_at_ms) / 1000))}s · {active.quality}）
           </button>
         ) : finalizing ? (
-          <span className="muted">收尾中…（正在写完 mp4）</span>
+          <span className="muted">裁剪中…（正在从整场录制切出片段）</span>
         ) : (
           <>
             <select className="qsel" value={quality} disabled={!live}
@@ -192,6 +193,7 @@ function RecordPanel() {
                 <td>{r.quality}</td>
                 <td>
                   {r.status === 'recording' && <span className="rec-live">● 录制中</span>}
+                  {r.status === 'cutting' && <span className="muted">裁剪中…</span>}
                   {r.status === 'done' && <span className="ok">完成 {r.size}</span>}
                   {r.status === 'error' && <span className="rec-err" title={r.error || ''}>失败</span>}
                 </td>

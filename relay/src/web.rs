@@ -1,9 +1,10 @@
-//! 内网页面 + 配置接口 + 录制/切片接口（axum，:8000）。
-//! - GET/POST /api/config：读写清晰度配置（持久化 config.json）
-//! - GET /api/config/stream：SSE，管理端一保存即广播新配置给所有在线观看端
-//! - POST /api/clip/start | /api/clip/end：观看时标记一段区间，据起止时间切片
-//! - GET /api/clip/status/:id | /api/clips | /api/recordings：切片/录制列表与进度
-//! - /clips/*、/recordings/*：切片下载 与 整场 HLS 回放（ServeDir，支持 Range）
+//! 内网页面 + 配置接口 + 录制接口（axum，:8000）。
+//! - GET /api/config | /api/config/stream：读配置 + SSE 下发 room/端口（管理端改配置即时同步）
+//! - GET /api/lan-ip：内网 IP + web 端口（前端生成分享二维码）
+//! - GET /api/record/state?owner=：是否有直播流可录 + 该浏览器是否有进行中的录制
+//! - POST /api/record/start | /api/record/stop：标记录制起点 / 停止转裁剪（按整场 full.mp4 切）
+//! - GET /api/records?owner=：某浏览器的「我的录制」列表
+//! - /clips/*：裁剪成品下载（ServeDir，支持 Range）+ 下载埋点
 //! - 其余路径：托管 rust-embed 打进二进制的 React 构建产物（SPA，回退 index.html）
 
 use std::convert::Infallible;
@@ -27,9 +28,6 @@ use tokio_stream::{wrappers::BroadcastStream, StreamExt};
 use tower_http::cors::CorsLayer;
 use tower_http::services::ServeDir;
 
-use streamhub::define::StreamHubEventSender;
-use tokio::sync::watch;
-
 use crate::config::{RelayConfig, SharedConfig};
 use crate::record::{self, RecTasks, Recording, SharedRec};
 
@@ -52,14 +50,13 @@ struct StopBody {
     id: String,
 }
 
-/// web 层共享状态：配置 + 配置广播 + 录制状态 + 录制所需的媒体 hub/退出信号/任务收集。
+/// web 层共享状态：配置 + 配置广播 + 录制状态 + 裁剪任务收集。
+/// （整场录制器由 main 的 spawn_monitor 持有 hub/shutdown，web 层不再需要）
 #[derive(Clone)]
 pub struct WebState {
     pub cfg: SharedConfig,
     pub tx: broadcast::Sender<RelayConfig>,
     pub rec: SharedRec,
-    pub hub: StreamHubEventSender,
-    pub shutdown: watch::Receiver<bool>,
     pub tasks: RecTasks,
 }
 
@@ -113,7 +110,7 @@ async fn record_state(
     let s = st.rec.read().await;
     let recording = match &q.owner {
         Some(o) => s.recordings.iter().any(|r| r.owner == *o && r.status == "recording"),
-        None => !s.stops.is_empty(),
+        None => s.recordings.iter().any(|r| r.status == "recording"),
     };
     Json(json!({ "live": s.current.is_some(), "recording": recording }))
 }
@@ -131,11 +128,9 @@ async fn record_start(
         return Err((StatusCode::BAD_REQUEST, format!("未知清晰度 {quality}")));
     }
     let owner = body.owner.unwrap_or_default();
-    let id = record::start_recording(
-        st.hub.clone(), st.rec.clone(), quality, owner, st.shutdown.clone(), st.tasks.clone(),
-    )
-    .await
-    .map_err(|e| (StatusCode::CONFLICT, e))?;
+    let id = record::start_recording(&st.rec, quality, owner)
+        .await
+        .map_err(|e| (StatusCode::CONFLICT, e))?;
     Ok(Json(json!({ "id": id })))
 }
 
@@ -144,7 +139,7 @@ async fn record_stop(
     State(st): State<WebState>,
     Json(body): Json<StopBody>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    record::stop_recording(&st.rec, &body.id)
+    record::stop_recording(&st.rec, &st.tasks, &body.id)
         .await
         .map_err(|e| (StatusCode::CONFLICT, e))?;
     Ok(Json(json!({ "ok": true })))
