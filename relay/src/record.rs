@@ -34,6 +34,8 @@ pub struct ActiveStream {
 #[derive(Debug, Clone, Serialize)]
 pub struct Recording {
     pub id: String,
+    /// 归属浏览器（前端 localStorage 里的随机 uid）；用于「我的录制」按用户隔离、离开再回来能停自己的。
+    pub owner: String,
     pub quality: String,
     pub status: String, // recording | done | error
     pub file: Option<String>,
@@ -178,6 +180,7 @@ pub async fn start_recording(
     hub: StreamHubEventSender,
     rec: SharedRec,
     quality: String,
+    owner: String,
     shutdown: watch::Receiver<bool>,
     tasks: RecTasks,
 ) -> Result<String, String> {
@@ -224,6 +227,7 @@ pub async fn start_recording(
         let mut s = rec.write().await;
         s.recordings.insert(0, Recording {
             id: id.clone(),
+            owner: owner.clone(),
             quality: quality.clone(),
             status: "recording".into(),
             file: None,

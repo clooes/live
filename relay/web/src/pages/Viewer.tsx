@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { QRCodeSVG } from 'qrcode.react'
 import { useWhep } from '../whep'
 import {
-  clipUrl, getLanIp, getConfig,
+  clipUrl, getLanIp, getConfig, getUid,
   recordState, recordStart, recordStop, listRecords,
   type Quality, type RecordItem, type RelayConfig,
 } from '../api'
@@ -98,6 +98,7 @@ function fmtTime(ms: number): string {
 /// 录制面板：选清晰度 → 开始录制（当场录成成品 mp4，有声）→ 停止即就绪，直接下载。
 /// 无整场回放、无裁剪、无有声/无声之分。录制状态由后端派生（刷新页面也能看到进行中的录制并停止）。
 function RecordPanel() {
+  const uid = getUid() // 本浏览器身份：录制归属它，离开再回来能停自己的
   const [qualities, setQualities] = useState<Quality[]>([])
   const [quality, setQuality] = useState('')
   const [records, setRecords] = useState<RecordItem[]>([])
@@ -117,7 +118,7 @@ function RecordPanel() {
   // 轮询直播/录制状态 + 片段列表
   async function refresh() {
     try {
-      const [st, recs] = await Promise.all([recordState(), listRecords()])
+      const [st, recs] = await Promise.all([recordState(uid), listRecords(uid)])
       setLive(st.live); setRecords(recs)
     } catch { /* 忽略 */ }
   }
@@ -143,7 +144,7 @@ function RecordPanel() {
   async function onStart() {
     setErr('')
     try {
-      await recordStart(quality)
+      await recordStart(quality, uid)
       refresh()
     } catch (e) { setErr(String(e)) }
   }

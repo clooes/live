@@ -49,8 +49,21 @@ export function whepUrl(room: string, webrtcPort: number): string {
 
 // ---------- 分段录制（点击录制即录成品 mp4）----------
 
+/// 浏览器身份：进入页面即读/生成一个随机 uid 存 localStorage。
+/// 录制归属该 uid，「我的录制」按它隔离；离开页面再回来（uid 仍在）能看到并停止自己的录制。
+export function getUid(): string {
+  const KEY = 'relay_uid'
+  let uid = localStorage.getItem(KEY)
+  if (!uid) {
+    uid = (crypto.randomUUID?.() ?? String(Date.now()) + Math.random().toString(16).slice(2))
+    localStorage.setItem(KEY, uid)
+  }
+  return uid
+}
+
 export interface RecordItem {
   id: string
+  owner: string
   quality: string
   status: 'recording' | 'done' | 'error'
   file: string | null
@@ -60,19 +73,19 @@ export interface RecordItem {
   ended_at_ms: number | null
 }
 
-/// 录制状态：当前是否有直播流可录 + 是否有进行中的录制。
-export async function recordState(): Promise<{ live: boolean; recording: boolean }> {
-  const r = await fetch('/api/record/state')
+/// 录制状态：当前是否有直播流可录 + 该浏览器是否有进行中的录制。
+export async function recordState(owner: string): Promise<{ live: boolean; recording: boolean }> {
+  const r = await fetch('/api/record/state?owner=' + encodeURIComponent(owner))
   if (!r.ok) throw new Error('读取录制状态失败')
   return r.json()
 }
 
-/// 开始录制（选清晰度），返回录制 id。
-export async function recordStart(quality: string): Promise<{ id: string }> {
+/// 开始录制（选清晰度 + 归属浏览器 uid），返回录制 id。
+export async function recordStart(quality: string, owner: string): Promise<{ id: string }> {
   const r = await fetch('/api/record/start', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ quality }),
+    body: JSON.stringify({ quality, owner }),
   })
   if (!r.ok) throw new Error(await r.text())
   return r.json()
@@ -88,9 +101,9 @@ export async function recordStop(id: string): Promise<void> {
   if (!r.ok) throw new Error(await r.text())
 }
 
-/// 录制片段列表（最新在前）。
-export async function listRecords(): Promise<RecordItem[]> {
-  const r = await fetch('/api/records')
+/// 「我的录制」列表（最新在前）：只返回该浏览器 uid 的录制。
+export async function listRecords(owner: string): Promise<RecordItem[]> {
+  const r = await fetch('/api/records?owner=' + encodeURIComponent(owner))
   if (!r.ok) throw new Error('读取录制列表失败')
   return r.json()
 }

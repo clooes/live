@@ -9,7 +9,7 @@
 use std::convert::Infallible;
 
 use axum::{
-    extract::{Request, State},
+    extract::{Query, Request, State},
     http::{header, Method, StatusCode, Uri},
     middleware::{self, Next},
     response::{
@@ -33,10 +33,17 @@ use tokio::sync::watch;
 use crate::config::{RelayConfig, SharedConfig};
 use crate::record::{self, RecTasks, Recording, SharedRec};
 
-/// 「开始录制」请求体：选清晰度（缺省用 default_quality）。
+/// 「开始录制」请求体：选清晰度（缺省用 default_quality）+ 归属浏览器 uid。
 #[derive(serde::Deserialize)]
 struct StartBody {
     quality: Option<String>,
+    owner: Option<String>,
+}
+
+/// 录制列表/状态的查询参数：按归属浏览器 uid 过滤（缺省不过滤，返回全部）。
+#[derive(serde::Deserialize)]
+struct OwnerQuery {
+    owner: Option<String>,
 }
 
 /// 「停止录制」请求体：录制 id。
@@ -98,10 +105,17 @@ async fn lan_ip(State(st): State<WebState>) -> Json<serde_json::Value> {
 
 // ---------- 分段录制 ----------
 
-/// 录制状态：当前是否有直播流可录 + 是否有进行中的录制。
-async fn record_state(State(st): State<WebState>) -> Json<serde_json::Value> {
+/// 录制状态：当前是否有直播流可录 + 该 owner 是否有进行中的录制（缺省 owner 则看全局）。
+async fn record_state(
+    State(st): State<WebState>,
+    Query(q): Query<OwnerQuery>,
+) -> Json<serde_json::Value> {
     let s = st.rec.read().await;
-    Json(json!({ "live": s.current.is_some(), "recording": !s.stops.is_empty() }))
+    let recording = match &q.owner {
+        Some(o) => s.recordings.iter().any(|r| r.owner == *o && r.status == "recording"),
+        None => !s.stops.is_empty(),
+    };
+    Json(json!({ "live": s.current.is_some(), "recording": recording }))
 }
 
 /// 「开始录制」：按所选清晰度当场起 ffmpeg 录成品 mp4（有声）。返回录制 id。
@@ -116,8 +130,9 @@ async fn record_start(
     if !st.cfg.read().await.qualities.iter().any(|x| x.name == quality) {
         return Err((StatusCode::BAD_REQUEST, format!("未知清晰度 {quality}")));
     }
+    let owner = body.owner.unwrap_or_default();
     let id = record::start_recording(
-        st.hub.clone(), st.rec.clone(), quality, st.shutdown.clone(), st.tasks.clone(),
+        st.hub.clone(), st.rec.clone(), quality, owner, st.shutdown.clone(), st.tasks.clone(),
     )
     .await
     .map_err(|e| (StatusCode::CONFLICT, e))?;
@@ -135,9 +150,17 @@ async fn record_stop(
     Ok(Json(json!({ "ok": true })))
 }
 
-/// 录制片段列表（最新在前）。
-async fn list_records(State(st): State<WebState>) -> Json<Vec<Recording>> {
-    Json(st.rec.read().await.recordings.clone())
+/// 录制片段列表（最新在前）。带 owner 则只返回该浏览器的录制（「我的录制」）。
+async fn list_records(
+    State(st): State<WebState>,
+    Query(q): Query<OwnerQuery>,
+) -> Json<Vec<Recording>> {
+    let s = st.rec.read().await;
+    let list = match &q.owner {
+        Some(o) => s.recordings.iter().filter(|r| r.owner == *o).cloned().collect(),
+        None => s.recordings.clone(),
+    };
+    Json(list)
 }
 
 /// SSE 配置流：连接即先推一份当前快照，之后每次变更实时推送。
