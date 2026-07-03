@@ -3,6 +3,7 @@
 
 # Rust 构建产物
 /relay/target/
+/relay/vendor/streamhub/target/
 
 # 前端（node_modules 与构建产物；dist 由 CI/本地 npm run build 生成，rust-embed 编译期需要）
 /relay/web/node_modules/

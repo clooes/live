@@ -34,8 +34,8 @@ impl Palette {
     }
 }
 
-/// 打印启动横幅。`ports` 决定地址表里显示的端口。
-pub fn print(ports: &Ports) {
+/// 打印启动横幅。`ports` 决定端口，`room` 填进推流/播放地址的 stream 名（免得用户还要猜 <key>）。
+pub fn print(ports: &Ports, room: &str) {
     // 传统 cmd/conhost 默认不解析 ANSI、代码页也非 UTF-8，先启用一次（现代终端调用亦无害）
     enable_windows_terminal();
     let p = Palette::pick();
@@ -60,19 +60,25 @@ pub fn print(ports: &Ports) {
     );
     println!();
 
-    // 地址表（0.0.0.0 = 监听所有网卡；下方用 localhost 便于本机点开）
+    // 推流来源多为另一台设备（OBS/手机），localhost 对它们无意义 → 地址优先用本机内网 IP；
+    // 取不到（无网卡/异常）才退回 localhost。0.0.0.0 已监听所有网卡，故此地址可直接被内网访问。
+    let host = local_ip_address::local_ip()
+        .map(|a| a.to_string())
+        .unwrap_or_else(|_| "localhost".into());
+
+    // 两个推流地址置顶（用户最关心）：WHIP（OBS 30+）与 RTMP（老设备/软件）二选一。
     let rows = [
-        ("观看/管理", format!("http://localhost:{}", ports.web), p.green),
-        ("WHIP 推流", format!("http://localhost:{}/whip?app=live&stream=<key>", ports.webrtc), p.yellow),
-        ("WHEP 播放", format!("http://localhost:{}/whep?app=live&stream=<key>", ports.webrtc), p.yellow),
-        ("RTMP 接收", format!("rtmp://localhost:{}/live/<key>", ports.rtmp), p.dim),
+        ("推流 WHIP", format!("http://{host}:{}/whip?app=live&stream={room}", ports.webrtc), p.yellow),
+        ("推流 RTMP", format!("rtmp://{host}:{}/live/{room}", ports.rtmp), p.yellow),
+        ("观看/管理", format!("http://{host}:{}", ports.web), p.green),
+        ("WHEP 播放", format!("http://{host}:{}/whep?app=live&stream={room}", ports.webrtc), p.cyan),
     ];
     for (label, url, color) in rows {
         println!("  {}{:<10}{} {}{}{}", p.bold, label, p.reset, color, url, p.reset);
     }
     println!(
-        "  {}提示：局域网内其他设备请把 localhost 换成本机内网 IP{}",
-        p.dim, p.reset
+        "  {}RTMP 推流填法：服务器 rtmp://{host}:{}/live ，串流码 {room}（本机自测可把 IP 换 localhost）{}",
+        p.dim, ports.rtmp, p.reset
     );
     println!();
 }

@@ -105,11 +105,19 @@
 | D17 | 录制机制（取代 R3回放/R4/R10） | ✅ 点击即分段录成品 mp4，弃用「全程录 HLS + 按墙钟 PDT 裁剪」（时间轴对齐脆弱、反复报 m3u8/区间错） |
 | D18 | 清晰度选择时机 | ✅ **录制时**选清晰度（起 ffmpeg 即按档编码），取代 R4「下载时选 + 按需切片」 |
 | D19 | 整场回放 + 音频形态 | ✅ 去掉整场回放；录制**直接有声**（`-c:a copy`），取消无声/6 选项（取代 R3 整场回放、R10 有声无声） |
+| D20 | 录制机制再演进（取代 D17 分段录） | ✅ 弃「点击起独立 ffmpeg 分段录成品」→ **开播即后台整场连续录 `full.mp4`（原画 copy）+ 点击只记标记、停止后台裁剪**。点录/停止瞬时、不等中途 SPS、多用户不各起编码器（批次 9） |
+| D21 | 录制归属/多用户 | ✅ 按浏览器 uid（localStorage 随机 id）隔离「我的录制」，**离开页面再回来能停自己的**（后端列表派生）。局部实现 R7 的一部分，仍非登录级隔离 |
+| D22 | 采集喂 ffmpeg 的方式（取代裸帧+管道） | ✅ 弃「订阅裸帧（H264 Annex-B + 转码 AAC）+ 管道 + `-use_wallclock_as_timestamps` 现打戳」→ **订阅 packet 原始 RTP + SDP 喂 ffmpeg，用原生时间戳**（视频 90kHz/音频 Opus 48kHz），根除 DTS 倒退/两路交错卡死/探测卡住/ADTS→mp4（批次 10） |
+| D23 | 整场音频编码 & 音画同步 | ✅ 整场 **h264+opus 直拷**、**裁剪时音频转 AAC**（兼容 Safari）；音画同步先「足够好」**不转发 RTCP**（靠两路首包近似对齐，实测明显不同步再上 RTCP）。作废 D13 墙钟近似 |
 
 > ⚠️ **录制架构重构（2026-07-02，commit 328253c）**：R3 整场回放、R4 下载选清晰度、R10 补音频+6选项
 > 这三条的实现已被**分段录制**取代（见批次 8）。旧条目/决策（D2/D3/D7/D11/D13/D14/D16 等）作为历史保留，
 > 但当前代码不再走那套。核心变化：录制 = 点击起独立 ffmpeg 按选定清晰度录成品 mp4（有声），
 > 停止即就绪直接下载；不再有 HLS 全程录制、墙钟裁剪、下载转码、整场回放。
+
+> ⚠️ **再演进（2026-07-03）**：批次 8 的「点击分段录」又被**批次 9「整场后台常录 + 标记裁剪」**取代（D20/D21，
+> 已实现 commits 45711c1 等）；采集方式再被**批次 10「packet RTP + SDP 喂 ffmpeg 原生时间戳」**重构（D22/D23，已完成）。
+> 即：开播即后台整场录 `full.mp4`，点录只记标记、停止后台从整场裁出成品。D13/D14/D17/D18 作为历史保留。
 
 > 实现补充：
 > - R8 端口属**启动期配置**，改 config.json 的 ports 后**需重启**（不像 room/清晰度 SSE 热更新）。
@@ -150,6 +158,24 @@
 - 冒烟：state/records/start(409 无流 / 400 未知清晰度) 均正确，**编译全绿**（净删 400+ 行）
 - ⚠️ 待真机（OBS 带麦）验证：实际录制 mp4 出片 + 音画同步（双路 wallclock 近似，D13 仍适用）
 - 备注：音频仅 mac/Linux（mkfifo）；Windows 后续单列
+- ⚠️ **已被批次 9 取代**：分段录（点击起 ffmpeg）中途订阅要等 SPS、每用户各起编码器、点录/停不够瞬时 → 改整场常录+裁剪
+
+### 批次 9 · 整场后台常录 + 标记裁剪（D20/D21）✅ 已完成（commits 45711c1 等）
+- [x] 开播（`spawn_monitor` 收 Publish）即起**一路持久 ffmpeg 整场连续录 fragmented `full.mp4`**（`data/sessions/<id>/`）；`start_recording` 只**记标记**（瞬时、不起 ffmpeg）；`stop_recording` 置终点后**后台 `cut_mark` 裁剪**（original 秒切 / 480p·720p 重编码）
+- [x] 按浏览器 uid 隔离「我的录制」，离开再回来能停自己的（D21）；会话文件保留 24h、开播/启动清过期
+- [x] 顺带修：streamhub **vendor 补丁**（send 失败即剔除死 sender，根治 `Transmiter send error`/`channel closed` 刷屏，见 [patch.crates-io]）；SPS 起点、退订
+- ⚠️ 裸帧+管道路的一堆坑（aac_adtstoasc、两路探测卡死、音频 DTS 倒退）虽逐一压住并**合成流自测通过（录 6s→6.12s 有声）**，但脆弱 → 见批次 10
+
+### 批次 10 · 采集改 RTP/SDP 原生时间戳（D22/D23）✅ 已完成
+- [x] `session_recorder` 改**订阅 packet（原始 RTP）→ 两路 UDP + SDP 喂 ffmpeg → 整场 `full.mp4`（h264 copy + aac）**：预备期从首个视频 RTP 读 payload type、宽限窗判有无音频；挑两个空闲 UDP 端口写 SDP（视频 H264/90000 + `packetization-mode=1`、音频 opus/48000/2，PT 用协商动态值）；用原生 RTP 时间戳复用两路（去掉 `-use_wallclock_as_timestamps`）
+- [x] `cut_clip` 音频改 `-c:a copy`（整场已是连续 AAC，不重复编码）；删裸帧路的 `adts_header`/`annexb_has_sps`/`mkfifo_at`/`subscribe_frames`
+- [x] 停止收尾：RTP 无 EOF，发 **SIGINT** 求干净 trailer；但 ffmpeg 阻塞 UDP 读时对 SIGINT 响应慢（实测 ~9s），而 fragmented mp4（empty_moov+frag_keyframe）moov 前置、每分片自包含，**SIGKILL 亦留下可播文件** → 只给 2s 宽限即强杀，停止响应快
+- [x] **真机复测修的坑**（1080p/6Mbps/5s 关键帧压测复现）：
+  - ① 画面很差 = **从 GOP 中间起步缺 SPS/PPS**（开头全是引用不到解码头的 P 帧，长关键帧间隔下 ffmpeg 探测窗超时定不了尺寸、整段录不下来或开头花屏）→ 预备期解析 RTP→H264 NAL（含 STAP-A），**等到带 SPS 的关键帧才起 ffmpeg**（`rtp_h264_has_sps`，丢弃之前 lead-in）；`analyzeduration/probesize` 放大到 10s/10MB 兜底；flush 前 sleep 400→**1200ms** 确保 ffmpeg 已 bind UDP 端口再发那唯一一个 SPS 包（否则发丢要等下个关键帧）
+  - ② 关键帧突发大包挤爆 localhost UDP 接收缓冲丢包（花/糊）→ ffmpeg 加 `-buffer_size 4194304`(4MB) + `-reorder_queue_size 2048`
+- [x] **D23 音频决策修订**：真机音频每约 5s 杂音/断。根因 = 真实编码器/网络因 **DTX（静音期不连续传输）/丢包/抖动** 在 Opus RTP 时间戳留空洞（whip 音频路径无 jitter/重排/丢包处理，`RtpQueue` 只给视频），而批次 10 的「整场 opus 直拷 + 裁剪裸 aac」**丢了旧路 `aresample=async` 的空洞平滑**（该滤镜正是 commit `7a8d9e1` 为此加的）。修：**整场就把音频重编码 AAC + `-af aresample=async=1`**（>0.1s 空洞插静音硬补偿、产出连续单调音频，native RTP 时戳单调故无旧路 wallclock 的 DTS 倒退），`full.mp4` 变 h264 copy + aac、裁剪音频直拷。取代 D23「音频 opus 直拷、裁剪转 AAC」（视频 copy 不变）
+- [x] 端到端验证：640x480 与 **1920x1080/6Mbps/-g150** 均出片；1080p 录跨多关键帧 **视频解码错误 0**、`full.mp4` 与成品均为 h264+aac、音轨/视轨时长对齐、opus-in-mp4 的 frame-size/时戳警告消失；`/clips/` 可下载；unpublish→收尾 ~2s。⚠️ 合成连续正弦**无时戳空洞、复现不出杂音**，音频修复的决定性验证需真机 OBS/麦克风流实测
+- 目的达成：根除"裸流现打墙钟戳"引发的全部时间戳/交错问题（旧路的 aac 队列倒退/两路 copy 交错卡死彻底消失），对真实 OBS（B 帧/可变帧率）更稳
 
 ### 批次 7 · 下载水印（R9 · 待排期，决策 D8~D10 已定）
 - [ ] R9 下载片段加图片水印（config.watermark + clip.rs filter_complex overlay + 缓存 key 含水印 + 容错回退）

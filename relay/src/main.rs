@@ -2,11 +2,13 @@
 //! 一个进程同时提供：
 //!   - WHIP 推流入口 + WHEP 播放出口（xwebrtc，:8900，OBS 全程 WebRTC）
 //!   - 内网页面 + 配置接口（axum，:8000）
-//!   - RTMP 接收（:1935，可选保留，首版 WebRTC 链路不依赖）
+//!   - RTMP 接收（:1935）+ RTMP→WHIP 内部桥：RTMP 推流经 ffmpeg 重编码回推 WHIP，
+//!     进入同一 WebRTC 链路（可播、可录），兼容只会推 RTMP 的设备/软件。
 //!
 //! 媒体路由由 streamhub 撮合。第 0 步已验证 WHIP→WHEP H.264 直通链路。
 
 mod banner;
+mod bridge;
 mod config;
 mod ffmpeg;
 mod logging;
@@ -31,8 +33,11 @@ async fn main() {
     let rtmp_addr = format!("0.0.0.0:{}", loaded.ports.rtmp);
     let whep_addr = format!("0.0.0.0:{}", loaded.ports.webrtc);
     let web_addr = format!("0.0.0.0:{}", loaded.ports.web);
+    // 端口先留存：loaded 稍后被移入 Arc<RwLock>，RTMP→WHIP 桥要用这两个端口拼内部 URL。
+    let rtmp_port = loaded.ports.rtmp;
+    let whep_port = loaded.ports.webrtc;
     // 启动横幅：ASCII art + 端口/地址表（先于各服务日志打印，用 println 不依赖 logger）
-    banner::print(&loaded.ports);
+    banner::print(&loaded.ports, &loaded.room);
     // 确定数据根目录（录制/切片），以二进制目录为基准或 config.data_dir，不随 CWD 变化
     let data_root = config::init_data_root(&loaded);
     // 装日志：控制台 + data_root/logs 下 system/user-ops/viewers 三个滚动文件。
@@ -64,10 +69,11 @@ async fn main() {
     record::spawn_monitor(
         stream_hub.get_client_event_consumer(),
         rec.clone(),
-        room,
+        room.clone(),
         stream_hub.get_hub_event_sender(),
         shutdown_rx.clone(),
         rec_tasks.clone(),
+        rtmp_port,
     );
 
     // RTMP 接收端（可选保留）
@@ -82,7 +88,15 @@ async fn main() {
             log::error!("RTMP 服务退出: {e}");
         }
     });
-    log::info!("RTMP 接收已启动 rtmp://{rtmp_addr}/live/<streamKey>（可选）");
+    log::info!("RTMP 接收已启动，推流地址 rtmp://{rtmp_addr}/live/{room}");
+
+    // RTMP→WHIP 桥：RTMP 推流上线即起 ffmpeg 转 WHIP 回推，进 WebRTC 链路（播放 + 录制）。
+    bridge::spawn_rtmp_bridge(
+        stream_hub.get_client_event_consumer(),
+        rtmp_port,
+        whep_port,
+        shutdown_rx.clone(),
+    );
 
     // WebRTC 端：同端口处理 WHIP(推) 与 WHEP(播)
     let mut webrtc_server = WebRTCServer::new(
@@ -95,8 +109,8 @@ async fn main() {
             log::error!("WebRTC 服务退出: {e}");
         }
     });
-    log::info!("WHIP 推流 http://{whep_addr}/whip?app=live&stream=<key>");
-    log::info!("WHEP 播放 http://{whep_addr}/whep?app=live&stream=<key>");
+    log::info!("WHIP 推流地址 http://{whep_addr}/whip?app=live&stream={room}");
+    log::info!("WHEP 播放地址 http://{whep_addr}/whep?app=live&stream={room}");
 
     // 内网页面 + 配置接口 + 录制接口（axum :8000）
     let web_app = web::router(web::WebState {
