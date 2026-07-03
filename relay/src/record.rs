@@ -199,6 +199,10 @@ pub async fn start_recording(
         app_name: active.app.clone(),
         stream_name: active.stream.clone(),
     };
+    // 留一份用于录制结束时退订（否则 hub 仍持有 frame_sender，whip 每帧往已 drop 的接收端发 →
+    // 刷屏 "send video packet error: channel closed"）。
+    let unsub_id = identifier.clone();
+    let unsub_info = sub_info.clone();
     let (tx, rx) = oneshot::channel();
     if hub
         .send(StreamHubEvent::Subscribe { identifier, info: sub_info, result_sender: tx })
@@ -242,6 +246,7 @@ pub async fn start_recording(
 
     let handle = tokio::spawn(record_task(
         frame_rx, quality, output, file_name, id.clone(), rec.clone(), stop_rx, shutdown,
+        hub, unsub_id, unsub_info,
     ));
     tasks.lock().await.push(handle);
     Ok(id)
@@ -272,6 +277,9 @@ async fn record_task(
     rec: SharedRec,
     mut stop_rx: oneshot::Receiver<()>,
     mut shutdown: watch::Receiver<bool>,
+    hub: StreamHubEventSender,
+    unsub_id: StreamIdentifier,
+    unsub_info: SubscriberInfo,
 ) {
     let dir = output.parent().map(|p| p.to_path_buf()).unwrap_or_else(clips_dir);
     let audio_fifo = dir.join(format!("audio_{id}.aac"));
@@ -430,6 +438,10 @@ async fn record_task(
         }
     }
     log::info!("录制收帧结束 video={nv} audio={na} id={id}");
+
+    // 退订：让 hub 移除本录制的 frame_sender，whip 不再往已停读的接收端发帧
+    // （否则每帧刷 "send video packet error: channel closed"）。
+    let _ = hub.send(StreamHubEvent::UnSubscribe { identifier: unsub_id, info: unsub_info });
 
     // 关两路写端 → ffmpeg EOF 收尾写 moov。加超时强杀兜底：
     // 流异常时 ffmpeg 可能不自行退出，若不兜底任务会永久卡在这、状态一直「录制中」。
