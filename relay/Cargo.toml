@@ -28,12 +28,14 @@ rust-embed = { version = "8", features = ["mime-guess"] }
 mime_guess = "2"
 # 内网分享二维码（R6）：探测本机内网 IP，供 /api/lan-ip 下发
 local-ip-address = "0.6"
-# R10 录制补音频：Unix 命名管道 mkfifo，给 ffmpeg 第二路输入喂 AAC 音频（tokio 已间接依赖 libc）
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
+# SSE 实时事件推送（跨平台）
 tokio-stream = { version = "0.1", features = ["sync"] }
 futures = "0.3"
 chrono = "0.4"
+
+# R10 录制补音频：Unix 命名管道 mkfifo，给 ffmpeg 第二路输入喂 AAC 音频（tokio 已间接依赖 libc）
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 # 本地补丁：
 # - xwebrtc 0.3.5 whip.rs 硬编码 H264 payload_type=96 → 改用 SDP 协商出的动态 PT
