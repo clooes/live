@@ -113,6 +113,22 @@ fn adts_header(payload_len: usize) -> [u8; 7] {
     ]
 }
 
+/// 扫描 Annex-B 码流里是否含 SPS（NAL type 7）——即该帧是否携带解码头。
+/// 中途订阅录制时，只有从带 SPS/PPS 的关键帧起步，`-c:v copy` 才能干净解码/拷贝。
+/// 兼容 3 字节(00 00 01)与 4 字节(00 00 00 01)起始码。
+fn annexb_has_sps(data: &[u8]) -> bool {
+    let mut i = 0usize;
+    while i + 3 < data.len() {
+        if data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1 {
+            if data[i + 3] & 0x1F == 7 { return true; } // NAL type 7 = SPS
+            i += 3;
+        } else {
+            i += 1;
+        }
+    }
+    false
+}
+
 /// 创建 Unix 命名管道（给 ffmpeg 的第二路音频输入）。Windows 无 mkfifo，音频仅 mac/Linux。
 #[cfg(unix)]
 fn mkfifo_at(path: &std::path::Path) -> std::io::Result<()> {
@@ -256,19 +272,32 @@ async fn record_task(
     let dir = output.parent().map(|p| p.to_path_buf()).unwrap_or_else(clips_dir);
     let audio_fifo = dir.join(format!("audio_{id}.aac"));
 
-    // ---- 预备阶段：探测有无音频（最多等 1.5s；期间视频帧丢弃，避免缓冲后 flush 造成 DTS 非单调）----
-    const PREAMBLE_MS: u64 = 1500;
+    // ---- 预备阶段：先攒够「一个能自解码的起点」再开 ffmpeg。----
+    // 录制是中途订阅：H.264 的 SPS/PPS(解码头)只在关键帧(GOP 边界)随帧带出，
+    // 若从任意 P 帧开录，`-c:v copy`(original) 会一直 non-existing PPS / no frame、不消费 stdin，
+    // relay 写视频被背压阻塞、3s 超时被迫早停（480p 走 libx264 解码容错故看似正常）。
+    // 对策：缓冲视频直到收到含 SPS 的帧，并从该帧起灌（丢弃之前的无头帧），让 copy 从关键帧干净起步；
+    // 同时用 [MIN,MAX] 窗口判定有无音频（不再一见音频就 break，否则可能一帧视频/解码头都没攒到）。
+    const PREAMBLE_MIN_MS: u64 = 500;  // 至少等这么久，够判定有无音频
+    const PREAMBLE_MAX_MS: u64 = 3000; // 最多等这么久去等一个含 SPS 的关键帧（覆盖常见 GOP）
     let preamble_start = now_ms();
+    let mut pending_video = Vec::new();
+    let mut sps_at: Option<usize> = None; // pending_video 中最后一个含 SPS 的帧下标
     let mut has_audio = false;
     let mut ended_early = false;
     loop {
         let elapsed = now_ms().saturating_sub(preamble_start);
-        if elapsed >= PREAMBLE_MS { break; }
-        let remaining = Duration::from_millis(PREAMBLE_MS - elapsed);
+        if elapsed >= PREAMBLE_MAX_MS { break; }
+        // 已拿到解码头且过了最短判定窗 → 可以开录
+        if sps_at.is_some() && elapsed >= PREAMBLE_MIN_MS { break; }
+        let remaining = Duration::from_millis(PREAMBLE_MAX_MS - elapsed);
         tokio::select! {
             frame = frame_rx.recv() => match frame {
-                Some(FrameData::Video { .. }) => {}
-                Some(FrameData::Audio { .. }) => { has_audio = true; break; }
+                Some(FrameData::Video { data, .. }) => {
+                    if annexb_has_sps(&data) { sps_at = Some(pending_video.len()); }
+                    pending_video.push(data);
+                }
+                Some(FrameData::Audio { .. }) => has_audio = true, // 记下有音频，但继续等 SPS
                 Some(_) => {}
                 None => { ended_early = true; break; }
             },
@@ -277,7 +306,14 @@ async fn record_task(
             _ = tokio::time::sleep(remaining) => break,
         }
     }
-    log::info!("录制探测完成 id={id} 音频={}", if has_audio { "有" } else { "无" });
+    // 从最后一个含 SPS 的帧起（丢弃它之前的无头帧）；没等到 SPS 就原样灌（尽力而为）。
+    if let Some(idx) = sps_at { pending_video.drain(0..idx); }
+    log::info!(
+        "录制探测完成 id={id} 音频={} 起点SPS={} 缓冲视频帧={}",
+        if has_audio { "有" } else { "无" },
+        if sps_at.is_some() { "已捕获" } else { "未捕获" },
+        pending_video.len(),
+    );
 
     // ---- 拉起 ffmpeg：视频 pipe + 可选音频 fifo，按清晰度编码，输出成品 mp4 ----
     let ff_log = std::fs::File::create(dir.join(format!("ffmpeg_{id}.log"))).ok();
@@ -336,8 +372,17 @@ async fn record_task(
         }
     }
 
-    // ---- 主收帧循环：视频→stdin，音频→fifo；停止/停流/退出即收尾 ----
+    // 先灌入预备阶段缓冲的视频帧（含 SPS/PPS/首关键帧），copy 模式据此才能正常解码/拷贝
     let mut nv = 0u64;
+    for data in pending_video.drain(..) {
+        nv += 1;
+        match tokio::time::timeout(Duration::from_secs(3), stdin.write_all(&data)).await {
+            Ok(Ok(())) => {}
+            _ => { log::warn!("灌入缓冲视频失败/超时 id={id}"); break; }
+        }
+    }
+
+    // ---- 主收帧循环：视频→stdin，音频→fifo；停止/停流/退出即收尾 ----
     let mut na = 0u64;
     if !ended_early {
         loop {
