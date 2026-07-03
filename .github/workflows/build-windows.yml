@@ -48,8 +48,8 @@ jobs:
       # 4) 放入 Windows 静态 ffmpeg.exe → build.rs 检测到即嵌入
       - name: Fetch static ffmpeg.exe
         shell: pwsh
-        run: |
-          Invoke-WebRequest -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" -OutFile ffmpeg.zip
+        run: | 
+          Invoke-WebRequest -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-master-latest-win64-gpl.zip" -OutFile ffmpeg.zip
           Expand-Archive ffmpeg.zip -DestinationPath ffmpeg_tmp
           $exe = Get-ChildItem -Recurse ffmpeg_tmp -Filter ffmpeg.exe | Select-Object -First 1
           New-Item -ItemType Directory -Force -Path relay/vendor/ffmpeg/windows-x64 | Out-Null
