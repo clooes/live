@@ -365,6 +365,10 @@ async fn cut_mark(rec: SharedRec, id: String) {
     };
     let Some((full, t0, start_ms, end_ms, quality, has_audio)) = snap else { return; };
 
+    // 等尾部落盘：停止时切的是直播边缘，fragmented mp4 最后 ~1-2s 尚未成形（partial file），
+    // 直接切会短一截。等一下让覆盖 [start,end] 的分片刷完（会话已结束的 full.mp4 已 finalize，等亦无害）。
+    tokio::time::sleep(Duration::from_millis(2000)).await;
+
     let start_s = start_ms.saturating_sub(t0) as f64 / 1000.0;
     let dur_s = end_ms.saturating_sub(start_ms) as f64 / 1000.0;
     let file_name = format!("clip_{id}_{quality}.mp4");
@@ -444,31 +448,40 @@ async fn session_recorder(
     let audio_fifo = dir.join("audio.aac");
 
     // ---- 预备阶段：攒到含 SPS 的关键帧再开 ffmpeg，并判定有无音频（[MIN,MAX] 窗口）----
-    const PREAMBLE_MIN_MS: u64 = 500;
-    const PREAMBLE_MAX_MS: u64 = 3000;
+    // 判定窗从「首帧到达」起算，而非从 Publish 起算：WHIP 握手(ICE/DTLS)要 ~1s，
+    // 媒体帧才开始流；若从 Publish 计时，首个视频帧到时早已过 min 窗 → 一见 SPS 就开录、
+    // 根本没等到音频（opus→aac 首帧比视频稍晚）。收到首帧后再宽限一段看有没有音频。
+    const AUDIO_GRACE_MS: u64 = 500; // 收到首帧后等这么久判定有无音频
+    const PREAMBLE_MAX_MS: u64 = 6000; // 从 Publish 起的总上限（容忍慢握手）
     let preamble_start = now_ms();
+    let mut first_media_ms: Option<u64> = None; // 首帧(视频/音频)到达时刻
     let mut pending_video: Vec<_> = Vec::new();
     let mut sps_at: Option<usize> = None;
     let mut has_audio = false;
     let mut ended_early = false;
     loop {
-        let elapsed = now_ms().saturating_sub(preamble_start);
-        if elapsed >= PREAMBLE_MAX_MS { break; }
-        if sps_at.is_some() && elapsed >= PREAMBLE_MIN_MS { break; }
-        let remaining = Duration::from_millis(PREAMBLE_MAX_MS - elapsed);
+        if now_ms().saturating_sub(preamble_start) >= PREAMBLE_MAX_MS { break; }
+        // 拿到解码头 + （已见音频 或 首帧后已等够判定窗）→ 开录
+        if let (Some(_), Some(fm)) = (sps_at, first_media_ms) {
+            if has_audio || now_ms().saturating_sub(fm) >= AUDIO_GRACE_MS { break; }
+        }
         tokio::select! {
             frame = frame_rx.recv() => match frame {
                 Some(FrameData::Video { data, .. }) => {
+                    if first_media_ms.is_none() { first_media_ms = Some(now_ms()); }
                     if annexb_has_sps(&data) { sps_at = Some(pending_video.len()); }
                     pending_video.push(data);
                 }
-                Some(FrameData::Audio { .. }) => has_audio = true,
+                Some(FrameData::Audio { .. }) => {
+                    if first_media_ms.is_none() { first_media_ms = Some(now_ms()); }
+                    has_audio = true;
+                }
                 Some(_) => {}
                 None => { ended_early = true; break; }
             },
             _ = &mut stop_rx => { ended_early = true; break; }
             _ = shutdown.changed() => { ended_early = true; break; }
-            _ = tokio::time::sleep(remaining) => break,
+            _ = tokio::time::sleep(Duration::from_millis(200)) => {} // 定期复查退出条件
         }
     }
     if let Some(idx) = sps_at { pending_video.drain(0..idx); }
@@ -487,8 +500,10 @@ async fn session_recorder(
     let ff_log = std::fs::File::create(dir.join("ffmpeg.log")).ok();
     let mut cmd = Command::new(crate::ffmpeg::path());
     cmd.args(["-hide_banner", "-loglevel", "warning"])
-        .args(["-analyzeduration", "1000000", "-probesize", "1000000"])
-        .args(["-thread_queue_size", "512"])
+        .args(["-analyzeduration", "500000", "-probesize", "500000"])
+        // 视频 pipe 缓冲调大：ffmpeg 打开/探测第二路(音频 fifo)时不读视频，
+        // 缓冲小会瞬间塞满 → relay 写视频阻塞超时。给足缓冲扛过探测窗口。
+        .args(["-thread_queue_size", "4096"])
         .args(["-use_wallclock_as_timestamps", "1"]) // PTS 跟真实时间，墙钟↔媒体时间不漂移
         .args(["-f", "h264", "-i", "pipe:0"]);
     if has_audio {
@@ -503,7 +518,10 @@ async fn session_recorder(
         #[cfg(not(unix))]
         { has_audio = false; }
         if has_audio {
-            cmd.args(["-thread_queue_size", "512"])
+            // 音频输入极小 probe：-f aac 格式已知，不需长探测；否则默认探测 ~5s，
+            // 期间 ffmpeg 只读音频不读视频 → 视频 pipe 塞满、写视频超时卡死。
+            cmd.args(["-analyzeduration", "0", "-probesize", "32"])
+                .args(["-thread_queue_size", "4096"])
                 .args(["-use_wallclock_as_timestamps", "1"])
                 .args(["-f", "aac", "-i"]).arg(&audio_fifo);
         }
@@ -512,11 +530,18 @@ async fn session_recorder(
     // 音频重编码 AAC：wallclock 毫秒戳下音频帧成串到达会 DTS 倒退，两路 copy 的 muxer 为交错
     // 而卡住 → 交错缓冲写满 → ffmpeg 停读视频 stdin → 写视频超时。重编码让编码器按采样数
     // 重生成单调时戳（开销极小），根除音频 DTS 非单调 + ADTS→ASC 问题。
-    if has_audio { cmd.args(["-c:a", "aac", "-b:a", "128k"]); }
+    // aresample=async=1000：wallclock 戳有抖动/倒退（Queue input is backward in time），
+    // 用异步重采样按输出时钟补/丢样本，产出连续单调音频，消除卡死。
+    if has_audio { cmd.args(["-af", "aresample=async=1000", "-c:a", "aac", "-b:a", "128k"]); }
     // -max_interleave_delta 0：不为音视频交错而阻塞，杜绝两路输入互相等待的卡死。
     cmd.args(["-max_interleave_delta", "0"]);
-    // fragmented mp4：边写边可裁、崩溃可播（不需 faststart）
-    cmd.args(["-movflags", "+frag_keyframe+empty_moov+default_base_moof"])
+    // fragmented mp4：边写边可裁、崩溃可播（不需 faststart）；
+    // frag_duration 0.5s：每 0.5s 强制刷一个分片，让可读边缘紧贴直播（否则尾部数秒未成形无法裁）。
+    cmd.args(["-frag_duration", "500000"])
+        // flush_packets：每写一包就 flush AVIO 缓冲到盘，否则分片攒在 ffmpeg 写缓冲里、
+        // 裁剪读端看不到最新数据 → 停止时切的成品仍短一截。
+        .args(["-flush_packets", "1"])
+        .args(["-movflags", "+frag_keyframe+empty_moov+default_base_moof"])
         .arg(&full)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
