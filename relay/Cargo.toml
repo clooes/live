@@ -35,7 +35,12 @@ tokio-stream = { version = "0.1", features = ["sync"] }
 futures = "0.3"
 chrono = "0.4"
 
-# 本地补丁：修复 xwebrtc 0.3.5 whip.rs 硬编码 H264 payload_type=96 的 bug，
-# 改为使用 SDP 协商出的动态 PT（否则 ffmpeg 等协商成 106 时视频包被全部丢弃）。
+# 本地补丁：
+# - xwebrtc 0.3.5 whip.rs 硬编码 H264 payload_type=96 → 改用 SDP 协商出的动态 PT
+#   （否则 ffmpeg 等协商成 106 时视频包被全部丢弃）。
+# - streamhub 0.2.4 transceiver 分发帧/包时 send 失败只打日志、从不清理死 sender，
+#   订阅者（观看端/录制）断开后每帧刷屏 "Transmiter send error" 且白 clone 数据 →
+#   改为 send 失败即从 map 剔除该 sender（见 vendor/streamhub/src/lib.rs fanout_*）。
 [patch.crates-io]
 xwebrtc = { path = "vendor/xwebrtc" }
+streamhub = { path = "vendor/streamhub" }
