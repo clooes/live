@@ -508,10 +508,13 @@ async fn session_recorder(
                 .args(["-f", "aac", "-i"]).arg(&audio_fifo);
         }
     }
-    cmd.args(["-c:v", "copy"]);
-    // 音频源是带 ADTS 头的 AAC，mp4 容器要裸 AAC(ASC)，直拷须加 aac_adtstoasc 转换，
-    // 否则 muxer 报 "Malformed AAC / Operation not permitted" 把 ffmpeg 打死（音频一到即崩）。
-    if has_audio { cmd.args(["-c:a", "copy", "-bsf:a", "aac_adtstoasc"]); }
+    cmd.args(["-c:v", "copy"]); // 视频无损直拷（原画）
+    // 音频重编码 AAC：wallclock 毫秒戳下音频帧成串到达会 DTS 倒退，两路 copy 的 muxer 为交错
+    // 而卡住 → 交错缓冲写满 → ffmpeg 停读视频 stdin → 写视频超时。重编码让编码器按采样数
+    // 重生成单调时戳（开销极小），根除音频 DTS 非单调 + ADTS→ASC 问题。
+    if has_audio { cmd.args(["-c:a", "aac", "-b:a", "128k"]); }
+    // -max_interleave_delta 0：不为音视频交错而阻塞，杜绝两路输入互相等待的卡死。
+    cmd.args(["-max_interleave_delta", "0"]);
     // fragmented mp4：边写边可裁、崩溃可播（不需 faststart）
     cmd.args(["-movflags", "+frag_keyframe+empty_moov+default_base_moof"])
         .arg(&full)
