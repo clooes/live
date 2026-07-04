@@ -110,6 +110,10 @@ pub async fn handle_whip(
     // 导致 .local 候选无法解析、ICE 建连失败 → 黑屏。禁用后两端都走真实 IP，平台差异消失。
     let mut setting_engine = webrtc::api::setting_engine::SettingEngine::default();
     setting_engine.set_ice_multicast_dns_mode(webrtc::ice::mdns::MulticastDnsMode::Disabled);
+    // 只用 IPv4 UDP 候选，剔除全部 IPv6。家用网络有公网 IPv6(240e:...)时，ICE 会优先选
+    // 公网 IPv6 候选对：握手小包能过(connected)，但运营商/路由器挡入站 IPv6 媒体流 →
+    // 几秒后 consent 失败掉成 disconnected/failed、画面一直不出。限定 Udp4 后走 IPv4 局域网直连。
+    setting_engine.set_network_types(vec![webrtc::ice::network_type::NetworkType::Udp4]);
 
     // Create the API object with the MediaEngine
     let api = APIBuilder::new()
