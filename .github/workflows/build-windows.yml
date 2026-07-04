@@ -46,9 +46,8 @@ jobs:
         run: echo "C:\Program Files\NASM" >> $env:GITHUB_PATH
 
       # 4) 放入 Windows 静态 ffmpeg.exe → build.rs 检测到即嵌入
-      # 必须用 BtbN 构建（TLS 后端 SChannel）：whip muxer 的 DTLS 在 verify=0 时 SChannel 不做
-      # 证书校验、能与 WebRTC 自签名证书握手；gyan.dev 构建是 GnuTLS 后端，DTLS 会强走 CA 链
-      # 校验，对自签名证书直接报 "Unable to verify peer certificate" 握手失败 → 桥必挂。
+      # 桥已改「裸 RTP 注入」（rtp_ingest.rs），不再依赖 whip muxer / DTLS 后端，
+      # 只需 libx264 + libopus + rtp muxer（各家静态构建都有）。用 BtbN 保持与文档一致。
       - name: Fetch static ffmpeg.exe
         shell: pwsh
         run: |
@@ -64,16 +63,10 @@ jobs:
           New-Item -ItemType Directory -Force -Path relay/vendor/ffmpeg/windows-x64 | Out-Null
           Copy-Item $exe.FullName relay/vendor/ffmpeg/windows-x64/ffmpeg.exe
 
-          relay/vendor/ffmpeg/windows-x64/ffmpeg.exe -muxers | Select-String "whip"
-          if ($LASTEXITCODE -ne 0) {
-              Write-Error "当前 ffmpeg 版本可能不含 WHIP muxer"
-              exit 1
-          }
-
-          # 防回归：禁止 GnuTLS 后端的构建混进来（DTLS 自签名校验失败，RTMP→WHIP 桥必挂）
-          $conf = relay/vendor/ffmpeg/windows-x64/ffmpeg.exe -hide_banner -buildconf | Out-String
-          if ($conf -match "enable-gnutls") {
-              Write-Error "此 ffmpeg 构建为 GnuTLS 后端，DTLS 无法与 WebRTC 自签名证书握手，请用 BtbN 构建"
+          # 桥必需的编码器/muxer 自检
+          $enc = relay/vendor/ffmpeg/windows-x64/ffmpeg.exe -hide_banner -encoders | Out-String
+          if ($enc -notmatch "libx264" -or $enc -notmatch "libopus") {
+              Write-Error "此 ffmpeg 构建缺 libx264/libopus，RTMP 桥无法工作"
               exit 1
           }
 

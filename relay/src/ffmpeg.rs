@@ -28,38 +28,6 @@ pub fn is_embedded() -> bool {
     EMBEDDED.is_some()
 }
 
-/// 探测某 ffmpeg 是否带 `whip` muxer（RTMP→WHIP 桥必需；不少内置/静态 build 未编入）。
-fn has_whip(exe: &std::path::Path) -> bool {
-    std::process::Command::new(exe)
-        .args(["-hide_banner", "-muxers"])
-        .output()
-        .map(|o| {
-            String::from_utf8_lossy(&o.stdout)
-                .lines()
-                .any(|l| l.split_whitespace().any(|t| t == "whip"))
-        })
-        .unwrap_or(false)
-}
-
-/// 返回一个支持 `whip` muxer 的 ffmpeg 路径（RTMP→WHIP 桥用）。内置优先；内置不含 whip 则回退
-/// PATH 的 `ffmpeg`（homebrew/较新发行版的 8.1+ 自带 whip）。都不支持返回 None（桥不启，仅告警）。
-pub fn whip_path() -> Option<PathBuf> {
-    static P: OnceLock<Option<PathBuf>> = OnceLock::new();
-    P.get_or_init(|| {
-        let primary = path();
-        if has_whip(&primary) {
-            return Some(primary);
-        }
-        let fallback = PathBuf::from("ffmpeg");
-        if fallback != primary && has_whip(&fallback) {
-            log::warn!("内置 ffmpeg 不含 whip muxer，RTMP→WHIP 桥回退 PATH 的 ffmpeg（{}）", fallback.display());
-            return Some(fallback);
-        }
-        None
-    })
-    .clone()
-}
-
 fn resolve() -> PathBuf {
     match EMBEDDED {
         Some(bytes) => match extract(bytes) {

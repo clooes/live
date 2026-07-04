@@ -13,7 +13,8 @@ relay 是纯 WebRTC 路线（WHIP 推 / WHEP 播），但 OBS 用 RTMP 更普遍
 
 ```
                        ┌─ 桥(bridge.rs)：ffmpeg 拉 RTMP → 重编码 H264 baseline + Opus
-                       │                 → -f whip 回推本机 :8900 → WebRTC 流 → WHEP 直播 ✅
+                       │                 → 裸 RTP → 本机 UDP → rtp_ingest.rs 注入 hub
+                       │                 → WebRTC 流 → WHEP 直播 ✅
 OBS ──单路 RTMP :1935──→│
                        └─ 录制(record.rs)：ffmpeg 直接拉 RTMP → -c copy 无损 → full.mp4 ✅
                                           （AAC 直拷，无 Opus/aresample/重编码 → 无哧哧底噪）
@@ -41,43 +42,47 @@ RTP 转发，丢了就再等下一个关键帧（可能 5s）。
 
 > 注：RTMP 直录路不经过这段（FLV 自带解码头），此修复只对 OBS 直接 WHIP 推流的场景有用。
 
-## 二、RTMP→WHIP 桥（bridge.rs）
+## 二、RTMP→WebRTC 桥（bridge.rs + rtp_ingest.rs）
 
-`spawn_rtmp_bridge` 监听 client-event，收到 `Publish{Rtmp}` 就起一路 ffmpeg：
-`-i rtmp://127.0.0.1:1935/<app>/<stream>` → 重编码 `H264 baseline + zerolatency + repeat-headers`
-+ `Opus 48k`（WebRTC 原生音频；RTMP 的 AAC 无法直进 WebRTC）→ `-f whip` 回推本机 :8900。
-收到 `UnPublish{Rtmp}` 杀对应 ffmpeg。桥只认 Rtmp 身份，不成环。
+`spawn_rtmp_bridge` 监听 client-event，收到 `Publish{Rtmp}` 就：
+1. `rtp_ingest.rs` 先向 streamhub 发布一路 **WebRTC 身份**的流（`PublishType::RtpPush`），
+   video/audio 各绑一个 `127.0.0.1` 随机 UDP 端口收裸 RTP；
+2. 起一路 ffmpeg：`-i rtmp://127.0.0.1:1935/<app>/<stream>` → 重编码 `H264 baseline +
+   zerolatency + repeat-headers` + `Opus 48k`（WebRTC 原生音频；RTMP 的 AAC 无法直进
+   WebRTC）→ `-f rtp` 分两路发到上述端口（`-payload_type` 96/111，`pkt_size=1200` 给 WHEP 侧
+   SRTP 封装留 MTU 余量）；
+3. 注入器把每个 UDP 数据报（=一个 RTP 包）包成 `PacketData` 发进 hub —— WHEP 端
+   （xwebrtc whep.rs）本就只消费完整 RTP 包，写 `TrackLocalStaticRTP` 时 SSRC/PT 按浏览器
+   协商重写，所以效果与 WHIP 推流完全等价。桥只认 Rtmp 身份，不成环。
 
-### whip-capable ffmpeg 要求（重要坑）
+**收桥不靠事件**：streamhub 只广播 `Publish`、从不广播 `UnPublish`（vendor lib.rs 的
+unpublish 不发 client event）。RTMP 停推 → 桥 ffmpeg 拉流 EOF 自行退出 → 每桥守护 task
+（`child.wait()`）撤发布收尾；ffmpeg 异常死亡同样被这个守护捕获（否则注入流成幽灵发布，
+下次推流 `publish` 撞 `Exists` 失败）。进程优雅退出时由 stop 信号杀 ffmpeg。
 
-`-f whip` 需要带 **whip muxer** 的 ffmpeg（依赖 DTLS/SSL，ffmpeg 8.1+）。现状：
+### 为什么不用 ffmpeg `-f whip` 回推（2026-07-04 弃用，重要坑）
 
-| ffmpeg 来源 | whip |
-|---|---|
-| evermeet（macOS 静态，无 DTLS） | ❌ 无 |
-| BtbN（Linux/Windows，Win 为 SChannel 后端） | ✅ 有（但**无 macOS 版**） |
-| gyan.dev（Windows，GnuTLS 后端） | ⚠️ 有 muxer **但 DTLS 握手必失败**（见下） |
-| homebrew 8.1+（arm64） | ✅ 有（动态链接，非单二进制） |
+最初方案是 ffmpeg `-f whip` 回推本机 :8900。**Windows 上全军覆没**，根因是 whip 的
+DTLS-SRTP 握手依赖 ffmpeg 的 TLS 后端，而各家静态构建的后端都不行：
 
-**⚠️ TLS 后端坑（2026-07-04 Windows 直播「等待推流」的根因）**：whip muxer 存在 ≠ 能用。
-whip 的 DTLS 对端是 WebRTC **自签名证书**（按 SDP 指纹信任），whip.c 设了 `verify=0`，但
-ffmpeg 各 TLS 后端行为不同：GnuTLS 的 DTLS 仍强走 CA 链校验 → 自签名直接
-`Unable to verify peer certificate: The request is invalid.` 握手失败、桥 ffmpeg 退出（表象：
-RTMP 侧刷 `pack error: bytes writer error: io error`，直播一直等待推流，录制正常）；
-SChannel 在 verify=0 时不校验 → 能握手。所以 **Windows 只能用 BtbN，不能用 gyan.dev**
-（gyan 是 GnuTLS）。CI（build-windows.yml）已改为拉 BtbN 并加了 `-buildconf` 含
-`enable-gnutls` 即 fail 的防回归检查。
+| Windows 构建 | TLS 后端 | 结果 |
+|---|---|---|
+| gyan.dev | GnuTLS | DTLS 强走 CA 链校验，WebRTC 自签名证书必失败：`Unable to verify peer certificate: The request is invalid.` |
+| BtbN | SChannel | 不支持 `use_srtp` 扩展，webrtc-rs 直接放弃：`SRTP support was requested but server did not respond with use_srtp extension`（ffmpeg 侧 `Creating security context failed (0x80090308)`） |
+| （能用的）OpenSSL 后端 | — | Windows **没有现成静态构建** |
 
-`ffmpeg::whip_path()` 探测：内置有 whip 就用内置，否则回退 PATH 的 ffmpeg，都没有则**禁用桥并告警**。
-**macOS 上没有现成的「静态 + whip」build**，故当前 mac 决策：`vendor/ffmpeg/macos-arm64/` 留空，
-桥回退 homebrew ffmpeg。Linux/Windows 打包时把 BtbN build 放进对应槽即可纯内置。
+表象：直播一直「等待推流」、RTMP 侧刷 `pack error: bytes writer error: io error`（桥 ffmpeg
+死了，RTMP 往死连接写数据），录制正常。macOS 也受害：无「静态 + whip」构建，只能回退
+homebrew。改裸 RTP 注入后 **whip muxer 不再是必需**，任何带 libx264+libopus 的 ffmpeg 都行，
+各平台纯内置。`ffmpeg::whip_path()` 探测已删。
 
 各平台 ffmpeg 槽位（build.rs 按编译目标平台选，目前只认 x64）：
-- `macos-arm64/`：evermeet arm64（录制用，whip 不需要，桥走 homebrew 回退）
-- `linux-x64/`：BtbN linux64（含 whip）
-- `windows-x64/`：BtbN win64（含 whip）
+- `macos-arm64/`：evermeet arm64
+- `linux-x64/`：BtbN linux64
+- `windows-x64/`：BtbN win64（CI 从 BtbN 拉取；gyan 现在其实也能用，但保持一致）
 
-✅ 已验证：OBS/ffmpeg 推 RTMP → 起桥 → WHIP 回推 → WHEP 直播正常。
+✅ 已验证（macOS 端到端）：ffmpeg 推 RTMP → 起桥 → RTP 注入 → 无头 Chromium WHEP 拉流
+connected、8s 解码 217 帧 640×360 + 音频正常；连推两场无 `Exists` 冲突；断流/退出收尾干净。
 
 ## 三、录制音频哧哧声：改 RTMP 直录（record.rs）
 
@@ -132,12 +137,9 @@ SChannel 在 verify=0 时不校验 → 能握手。所以 **Windows 只能用 Bt
 
 | 项 | 状态 |
 |---|---|
-| RTMP→WHIP 桥直播 | ✅ 通 |
+| RTMP→WebRTC 桥直播（裸 RTP 注入，macOS 端到端 + 无头浏览器 WHEP） | ✅ 通 |
+| 连推两场不撞 Exists（幽灵发布已修，守护 task 撤发布） | ✅ 通 |
+| Windows 实机（此前 whip 路线因 DTLS 后端全挂，待新包复测） | ⏳ 待复测 |
 | RTMP 直录、音频 AAC 无损、无哧哧 | ✅ 通 |
 | SPS/PPS 修复（WHIP 直推录制路） | ✅ 通 |
-| 桥挑 whip-capable ffmpeg + 回退 | ✅ 通 |
 | phantom 自转推 → 多录一个会话 | ⚠️ 待修（见上，方案 1 去抖） |
-
-## 未提交
-
-以上改动均在工作区，未 commit。
