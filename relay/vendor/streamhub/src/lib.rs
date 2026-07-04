@@ -131,6 +131,11 @@ impl StreamDataTransceiver {
             loop {
                 tokio::select! {
                     data = receiver.recv() => {
+                       // 发送端已全部 drop：recv 会立刻且永远返回 None，不 break 就是
+                       // 100% CPU 空转（发布者只发 packet、frame sender 早释放时踩过）。
+                       if data.is_none() {
+                           break;
+                       }
                        Self::receive_frame_data(data, &frame_senders).await;
                     }
                     _ = exit.recv()=>{
@@ -185,6 +190,10 @@ impl StreamDataTransceiver {
             loop {
                 tokio::select! {
                     data = receiver.recv() => {
+                       // 同 receive_frame_data_loop：通道关闭（None）必须退出，防空转
+                       if data.is_none() {
+                           break;
+                       }
                        Self::receive_packet_data(data, &packet_senders).await;
                     }
                     _ = exit.recv()=>{
@@ -339,6 +348,10 @@ impl StreamDataTransceiver {
                 tokio::select! {
                     data = receiver.recv()  =>
                     {
+                        // 同 receive_frame_data_loop：通道关闭（None）必须退出，防空转
+                        if data.is_none() {
+                            break;
+                        }
                         Self::receive_statistics_data(data, &statistics_data).await;
                     }
                     _ = exit_receive.recv()=>{

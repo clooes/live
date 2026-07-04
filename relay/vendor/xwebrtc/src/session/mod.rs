@@ -397,7 +397,17 @@ impl WebRTCServerSession {
             });
         }
 
-        let receiver = event_result_receiver.await??.0.packet_receiver.unwrap();
+        // 流不存在/未就绪（如 RTMP 桥重建间隙）时不再向上传播错误——那会导致不回任何 HTTP
+        // 响应直接断连 + 刷 "session run error" 日志。改回干净的 404，播放端按失败自动重试。
+        let receiver = match event_result_receiver.await? {
+            Ok(recv) => recv.0.packet_receiver.unwrap(),
+            Err(err) => {
+                log::info!("whep 订阅被拒（流不存在/未就绪）: {}", err);
+                let mut response = Self::gen_response(http::StatusCode::NOT_FOUND);
+                response.body = Some("stream not found".to_string());
+                return self.send_response(&response).await;
+            }
+        };
 
         let (pc_state_sender, mut pc_state_receiver) = broadcast::channel(1);
 
@@ -544,6 +554,12 @@ impl WebRTCServerSession {
         response
             .headers
             .insert("Access-Control-Allow-Method".to_owned(), "POST".to_owned());
+        // 本服务一条 TCP 连接只读一个请求，响应后不再读。所有响应都声明 Connection: close，
+        // 禁止浏览器 keep-alive 复用：否则复用空闲连接发的下一个请求（如播放页断流后重连的
+        // WHEP POST）永远无响应，页面卡死在「连接中」直到超时。
+        response
+            .headers
+            .insert("Connection".to_owned(), "close".to_owned());
         response
     }
 

@@ -53,8 +53,13 @@ impl WebRTCServer {
 
                     match http_request_data.method.as_str() {
                         http_method_name::POST => {
-                            if let Some(uuid) = session_unlock.session_id {
-                                uuid_2_session_unlock.insert(uuid, session.clone());
+                            // 只保留真正建立了 PC 的会话：订阅被拒（404）等失败路径若也塞进
+                            // map，session（含 TCP 连接）被永久持有——连接不关，浏览器
+                            // keep-alive 复用它发的下一个请求永远无响应；且纯内存泄漏。
+                            if session_unlock.peer_connection.is_some() {
+                                if let Some(uuid) = session_unlock.session_id {
+                                    uuid_2_session_unlock.insert(uuid, session.clone());
+                                }
                             }
                         }
                         http_method_name::OPTIONS => {}

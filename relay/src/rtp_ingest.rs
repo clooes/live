@@ -35,6 +35,9 @@ pub struct RtpIngest {
     publisher_id: Uuid,
     hub: StreamHubEventSender,
     tasks: Vec<JoinHandle<()>>,
+    // 保活：发完 MediaInfo 后仍持有 frame sender 到 stop()。若早 drop，hub 的
+    // receive_frame_data_loop 会一直收 None（vendor 已加 break 兜底，但不该依赖它）。
+    _frame_sender: Option<streamhub::define::FrameDataSender>,
 }
 
 impl RtpIngest {
@@ -98,6 +101,7 @@ impl RtpIngest {
             publisher_id,
             hub,
             tasks,
+            _frame_sender: frame_sender,
         })
     }
 

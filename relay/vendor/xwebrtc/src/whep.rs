@@ -163,6 +163,7 @@ pub async fn handle_whep(
     let _ = gather_complete.recv().await;
 
     // Read RTP packets forever and send them to the WebRTC Client
+    let pc_for_loop = Arc::clone(&peer_connection);
     tokio::spawn(async move {
         loop {
             tokio::select! {
@@ -180,6 +181,16 @@ pub async fn handle_whep(
                                 }
                             }
                         }
+                    } else {
+                        // 上游流已下线（发布者 UnPublish，如 RTMP 断推/桥重启）：recv 只会一直
+                        // 返回 None。原实现在此空转（busy loop 烧 CPU），且 PC 不关——浏览器侧
+                        // ICE 仍是 connected，播放端的断线自动重连永远不触发，只能手点重连。
+                        // 改为：关掉 PC 让浏览器立刻感知断流走自动重连，退出本循环。
+                        log::info!("WHEP 上游流已下线，关闭订阅端 peer connection 触发播放端重连");
+                        if let Err(err) = pc_for_loop.close().await {
+                            log::error!("close peer connection on upstream gone error: {}", err);
+                        }
+                        break;
                     }
                 }
                 pc_state = state_receiver.recv() =>{
