@@ -55,8 +55,18 @@ RTP 转发，丢了就再等下一个关键帧（可能 5s）。
 | ffmpeg 来源 | whip |
 |---|---|
 | evermeet（macOS 静态，无 DTLS） | ❌ 无 |
-| BtbN（Linux/Windows，含 DTLS） | ✅ 有（但**无 macOS 版**） |
+| BtbN（Linux/Windows，Win 为 SChannel 后端） | ✅ 有（但**无 macOS 版**） |
+| gyan.dev（Windows，GnuTLS 后端） | ⚠️ 有 muxer **但 DTLS 握手必失败**（见下） |
 | homebrew 8.1+（arm64） | ✅ 有（动态链接，非单二进制） |
+
+**⚠️ TLS 后端坑（2026-07-04 Windows 直播「等待推流」的根因）**：whip muxer 存在 ≠ 能用。
+whip 的 DTLS 对端是 WebRTC **自签名证书**（按 SDP 指纹信任），whip.c 设了 `verify=0`，但
+ffmpeg 各 TLS 后端行为不同：GnuTLS 的 DTLS 仍强走 CA 链校验 → 自签名直接
+`Unable to verify peer certificate: The request is invalid.` 握手失败、桥 ffmpeg 退出（表象：
+RTMP 侧刷 `pack error: bytes writer error: io error`，直播一直等待推流，录制正常）；
+SChannel 在 verify=0 时不校验 → 能握手。所以 **Windows 只能用 BtbN，不能用 gyan.dev**
+（gyan 是 GnuTLS）。CI（build-windows.yml）已改为拉 BtbN 并加了 `-buildconf` 含
+`enable-gnutls` 即 fail 的防回归检查。
 
 `ffmpeg::whip_path()` 探测：内置有 whip 就用内置，否则回退 PATH 的 ffmpeg，都没有则**禁用桥并告警**。
 **macOS 上没有现成的「静态 + whip」build**，故当前 mac 决策：`vendor/ffmpeg/macos-arm64/` 留空，
