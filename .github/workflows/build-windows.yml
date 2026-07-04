@@ -49,11 +49,24 @@ jobs:
       - name: Fetch static ffmpeg.exe
         shell: pwsh
         run: |
-          Invoke-WebRequest -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-master-latest-win64-gpl.zip" -OutFile ffmpeg.zip
-          Expand-Archive ffmpeg.zip -DestinationPath ffmpeg_tmp
+          Invoke-WebRequest -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-git-full.7z" -OutFile ffmpeg.7z
+          & "C:\Program Files\7-Zip\7z.exe" x ffmpeg.7z -offmpeg_tmp -y
+
           $exe = Get-ChildItem -Recurse ffmpeg_tmp -Filter ffmpeg.exe | Select-Object -First 1
+          if (-not $exe) {
+              Write-Error "未找到 ffmpeg.exe，解压可能失败"
+              exit 1
+          }
+
           New-Item -ItemType Directory -Force -Path relay/vendor/ffmpeg/windows-x64 | Out-Null
           Copy-Item $exe.FullName relay/vendor/ffmpeg/windows-x64/ffmpeg.exe
+
+          relay/vendor/ffmpeg/windows-x64/ffmpeg.exe -muxers | Select-String "whip"
+          if ($LASTEXITCODE -ne 0) {
+              Write-Error "当前 ffmpeg 版本可能不含 WHIP muxer"
+              exit 1
+          }
+
           Write-Host "ffmpeg.exe 就位：$((Get-Item relay/vendor/ffmpeg/windows-x64/ffmpeg.exe).Length) bytes"
 
       # 5) 编译 release

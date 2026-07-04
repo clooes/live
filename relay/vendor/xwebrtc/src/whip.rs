@@ -105,10 +105,17 @@ pub async fn handle_whip(
     // Use the default set of Interceptors
     registry = register_default_interceptors(registry, &mut m)?;
 
+    // 禁用 mDNS：不再生成 xxxx.local 候选、也不启动 mDNS 收包 socket，直接用真实 IP。
+    // Windows 上 mDNS 收到超大 UDP 包会返回 WSAEMSGSIZE(10040) 把收包循环搞崩，
+    // 导致 .local 候选无法解析、ICE 建连失败 → 黑屏。禁用后两端都走真实 IP，平台差异消失。
+    let mut setting_engine = webrtc::api::setting_engine::SettingEngine::default();
+    setting_engine.set_ice_multicast_dns_mode(webrtc::ice::mdns::MulticastDnsMode::Disabled);
+
     // Create the API object with the MediaEngine
     let api = APIBuilder::new()
         .with_media_engine(m)
         .with_interceptor_registry(registry)
+        .with_setting_engine(setting_engine)
         .build();
 
     // Prepare the configuration
