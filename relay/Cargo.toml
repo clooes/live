@@ -3,6 +3,11 @@ name = "relay"
 version = "0.1.0"
 edition = "2021"
 
+# 发布瘦身：thin-LTO + 去符号（大头是内嵌 ffmpeg，但 Rust 侧也能白省一二十 MB）
+[profile.release]
+lto = "thin"
+strip = "symbols"
+
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 log = "0.4"

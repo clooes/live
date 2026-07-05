@@ -11,7 +11,9 @@ pub enum StreamHubErrorValue {
     NoAppName,
     #[fail(display = "no stream name")]
     NoStreamName,
-    #[fail(display = "no app or stream name")]
+    // 实际含义是「订阅的流在 hub 里不存在（尚未开播）」，原文案 "no app or stream name"
+    // 像请求参数缺失，极易误导排查方向，改为直说
+    #[fail(display = "stream not found (not published yet)")]
     NoAppOrStreamName,
     #[fail(display = "exists")]
     Exists,

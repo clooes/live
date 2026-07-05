@@ -72,7 +72,12 @@ jobs:
 
           Write-Host "ffmpeg.exe 就位：$((Get-Item relay/vendor/ffmpeg/windows-x64/ffmpeg.exe).Length) bytes"
 
-      # 5) 编译 release
+      # 5) Lint 挡低级回归（只 lint relay 本体；vendor 路径依赖的警告不受 -D 影响）
+      - name: Clippy
+        working-directory: relay
+        run: cargo clippy --release -p relay -- -D warnings
+
+      # 6) 编译 release
       - name: Build relay (release)
         working-directory: relay
         run: cargo build --release

@@ -374,7 +374,7 @@ async fn on_publish_rtmp(
     app: String,
     stream: String,
 ) {
-    let _ = tokio::task::spawn_blocking(clean_old_sessions);
+    drop(tokio::task::spawn_blocking(clean_old_sessions)); // 后台清理，句柄不等
 
     let session_id = now_ms().to_string();
     let dir = sessions_dir().join(&session_id);
@@ -403,7 +403,7 @@ async fn on_publish(
     app: String,
     stream: String,
 ) {
-    let _ = tokio::task::spawn_blocking(clean_old_sessions);
+    drop(tokio::task::spawn_blocking(clean_old_sessions)); // 后台清理，句柄不等
 
     let (packet_rx, unsub_id, unsub_info) = match subscribe_packets(hub, &app, &stream).await {
         Ok(v) => v,

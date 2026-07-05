@@ -113,7 +113,8 @@ async fn start_bridge(
             "-c:v", "libx264", "-preset", "veryfast", "-tune", "zerolatency",
             "-profile:v", "baseline", "-pix_fmt", "yuv420p",
         ])
-        .args(["-x264-params", "repeat-headers=1:keyint=60:min-keyint=60:scenecut=0"])
+        // keyint=30（1s@30fps）：观众中途进场要等下一个关键帧才有画面，1s 封顶；代价是码率略涨
+        .args(["-x264-params", "repeat-headers=1:keyint=30:min-keyint=30:scenecut=0"])
         .args(["-payload_type", "96", "-f", "rtp", &video_out])
         .args(["-map", "0:a:0"])
         .args(["-c:a", "libopus", "-b:a", "128k", "-ar", "48000", "-ac", "2"])

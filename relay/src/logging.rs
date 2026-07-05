@@ -21,6 +21,31 @@ use tracing_subscriber::EnvFilter;
 const T_VIEWERS: &str = "viewers";
 const T_USER_OPS: &str = "user_ops";
 
+/// 日志保留天数：滚动文件只滚不删会无限攒，启动时清掉过期的。
+const LOG_RETENTION_DAYS: u64 = 7;
+
+/// 启动时清理 logs 目录下超过保留期的文件（按 mtime；含按日滚动的 *.log.<date> 与 bridge-*.log）。
+fn clean_old_logs(logs_dir: &Path) {
+    let Ok(rd) = std::fs::read_dir(logs_dir) else { return };
+    let now = std::time::SystemTime::now();
+    for e in rd.flatten() {
+        let p = e.path();
+        if !p.is_file() {
+            continue;
+        }
+        let expired = e
+            .metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| now.duration_since(t).ok())
+            .map(|d| d.as_secs() > LOG_RETENTION_DAYS * 86_400)
+            .unwrap_or(false);
+        if expired {
+            let _ = std::fs::remove_file(&p);
+        }
+    }
+}
+
 /// 初始化日志。返回的 `WorkerGuard` 必须在进程存活期间保活（drop 会丢未刷盘日志），
 /// 故调用方应把返回值绑定到 main 的局部变量直到退出。
 pub fn init(data_root: &Path) -> Vec<WorkerGuard> {
@@ -28,6 +53,7 @@ pub fn init(data_root: &Path) -> Vec<WorkerGuard> {
     if let Err(e) = std::fs::create_dir_all(&logs_dir) {
         eprintln!("创建日志目录失败 {}：{e}", logs_dir.display());
     }
+    clean_old_logs(&logs_dir);
 
     let (sys_w, g_sys) = tracing_appender::non_blocking(
         tracing_appender::rolling::daily(&logs_dir, "system.log"),
