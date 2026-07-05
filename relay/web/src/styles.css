@@ -34,12 +34,7 @@ body {
 .overlay {
   position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
   color: #cbd0d8; background: rgba(0,0,0,.35); font-size: 14px;
-}
-/* 自动播放被拦（iOS 低电量模式等）：整块可点的「点击播放」引导 */
-.overlay.tap { flex-direction: column; gap: 12px; cursor: pointer; font-size: 16px; color: #fff; }
-.overlay.tap .tap-btn {
-  width: 64px; height: 64px; border-radius: 50%; display: flex; align-items: center;
-  justify-content: center; font-size: 26px; background: rgba(229,72,77,.9); padding-left: 5px;
+  pointer-events: none; /* 纯状态展示，别挡视频原生控件 */
 }
 .bar { display: flex; align-items: center; gap: 12px; margin-top: 12px; font-size: 14px; }
 .dot { width: 9px; height: 9px; border-radius: 50%; background: #666; }

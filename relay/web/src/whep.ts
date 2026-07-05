@@ -94,7 +94,7 @@ export function useWhep(videoRef: RefObject<HTMLVideoElement>, room: string, web
     const blocked = () => {
       needTapRef.current = true
       setNeedTap(true)
-      setStatus('点击画面开始播放')
+      setStatus('点播放器上的 ▶ 开始观看') // 显示在下方状态栏；播放器露原生控件
     }
     v.muted = true
     v.play().then(() => {
@@ -211,7 +211,7 @@ export function useWhep(videoRef: RefObject<HTMLVideoElement>, room: string, web
       needTapRef.current = true
       setLive(false)
       setNeedTap(true)
-      setStatus('已暂停，点击播放')
+      setStatus('已暂停，点播放器上的 ▶ 继续')
     }
     v?.addEventListener('playing', onPlaying)
     v?.addEventListener('loadedmetadata', onLoadedMeta)
