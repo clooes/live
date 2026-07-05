@@ -9,10 +9,27 @@ import {
 
 export function Viewer() {
   const videoRef = useRef<HTMLVideoElement>(null)
+  const wrapRef = useRef<HTMLDivElement>(null)
   const [room, setRoom] = useState('')
   const [webrtcPort, setWebrtcPort] = useState(0)
   const [synced, setSynced] = useState(false)
-  const { status, live, reconnect } = useWhep(videoRef, room, webrtcPort)
+  // 断流/失败全自动重连（useWhep 内含重试链 + 出画面看门狗），页面不再放手动重连按钮
+  const { status, live } = useWhep(videoRef, room, webrtcPort)
+
+  // 全屏：优先全屏容器（连同状态浮层）；iPhone Safari 不支持元素全屏，回退 video 原生全屏
+  function toggleFullscreen() {
+    if (document.fullscreenElement) {
+      document.exitFullscreen().catch(() => {})
+      return
+    }
+    const wrap = wrapRef.current
+    const v = videoRef.current as (HTMLVideoElement & { webkitEnterFullscreen?: () => void }) | null
+    if (wrap?.requestFullscreen) {
+      wrap.requestFullscreen().catch(() => v?.webkitEnterFullscreen?.())
+    } else {
+      v?.webkitEnterFullscreen?.()
+    }
+  }
 
   // SSE 订阅配置：连接即收到当前快照，管理端一改立即收到新配置并自动切换。
   useEffect(() => {
@@ -31,9 +48,12 @@ export function Viewer() {
 
   return (
     <div className="viewer">
-      <div className="player-wrap">
-        <video ref={videoRef} autoPlay playsInline muted controls className="player" />
+      <div className="player-wrap" ref={wrapRef}>
+        <video ref={videoRef} autoPlay playsInline muted controls className="player"
+          onDoubleClick={toggleFullscreen} />
         {!live && <div className="overlay">{status}</div>}
+        {/* 仅全屏时显示（CSS :fullscreen 控制）：全屏后工具栏被盖住，需页面内退出途径 */}
+        <button className="fs-exit" onClick={toggleFullscreen}>✕ 退出全屏</button>
       </div>
       <div className="bar">
         <span className={live ? 'dot live' : 'dot'} />
@@ -42,7 +62,7 @@ export function Viewer() {
           房间：{room || '…'}
           <span className="sync" title="配置实时同步">{synced ? ' · 已同步' : ' · 离线'}</span>
         </span>
-        <button onClick={reconnect}>重连</button>
+        <button onClick={toggleFullscreen}>⛶ 全屏</button>
         <ShareButton />
       </div>
       <RecordPanel />
