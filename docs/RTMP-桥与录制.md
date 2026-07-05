@@ -1,7 +1,7 @@
 # RTMP 推流：桥接直播 + 直录录制
 
 > 记录 relay 支持 OBS RTMP 推流的完整改造：为什么做、怎么做、已验证什么、还有什么坑没填。
-> 涉及文件：`relay/src/{record.rs, bridge.rs, ffmpeg.rs, main.rs, banner.rs}`。
+> 涉及文件：`relay/src/{record.rs, bridge.rs, rtp_ingest.rs, ffmpeg.rs, main.rs, banner.rs}`。
 
 ## 背景
 
