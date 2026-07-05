@@ -30,6 +30,26 @@ export interface WhepApi {
 //   页面显示「点击播放」浮层；用户手势里调 resume() 即恢复。此状态下看门狗不能重连——
 //   流是好的，只是播放被拦，重连只会无限循环。
 // - loadedmetadata 后再补一次 play()：iOS 上 ontrack 时可能还没数据，首次 play() 会白试。
+//
+// 微信内置浏览器（微信扫码进来的场景）：
+// - 微信禁自动播比 Safari 更严，但有专属解锁通道：在 WeixinJSBridgeReady 事件（或
+//   WeixinJSBridge.invoke 回调）里调 play() 被微信视为可信上下文放行——微信 H5 自动播的
+//   标准解法。play() 被拒时也再走一次 bridge 通道重试，都不行才亮「点击播放」浮层兜底。
+// - 安卓微信 X5 内核需私有属性 webkit-playsinline / x5-playsinline，否则视频被劫持成
+//   全屏原生播放器。
+
+const isWeChat = typeof navigator !== 'undefined' && /MicroMessenger/i.test(navigator.userAgent)
+
+/** 在微信的可信上下文（JSBridge 回调）里执行 fn；bridge 未就绪则等 WeixinJSBridgeReady。 */
+function wxTrusted(fn: () => void) {
+  type WxWindow = Window & { WeixinJSBridge?: { invoke: (api: string, p: object, cb: () => void) => void } }
+  const w = window as WxWindow
+  if (w.WeixinJSBridge?.invoke) {
+    w.WeixinJSBridge.invoke('getNetworkType', {}, fn)
+  } else {
+    document.addEventListener('WeixinJSBridgeReady', fn, { once: true })
+  }
+}
 export function useWhep(videoRef: RefObject<HTMLVideoElement>, room: string, webrtcPort: number): WhepApi {
   const [status, setStatus] = useState('未连接')
   const [live, setLive] = useState(false)
@@ -66,19 +86,30 @@ export function useWhep(videoRef: RefObject<HTMLVideoElement>, room: string, web
     retryTimerRef.current = setTimeout(() => playRef.current(), delayMs)
   }, [])
 
-  // 尝试自动播放：被拦截（NotAllowedError）时亮出「点击播放」，其余错误静默（等下次时机再试）
+  // 尝试自动播放：被拦截（NotAllowedError）时先试微信可信通道，仍不行才亮「点击播放」；
+  // 其余错误静默（等下次时机再试）
   const tryPlay = useCallback(() => {
     const v = videoRef.current
     if (!v) return
+    const blocked = () => {
+      needTapRef.current = true
+      setNeedTap(true)
+      setStatus('点击画面开始播放')
+    }
     v.muted = true
     v.play().then(() => {
       needTapRef.current = false
       setNeedTap(false)
     }).catch((err: unknown) => {
-      if ((err as DOMException)?.name === 'NotAllowedError') {
-        needTapRef.current = true
-        setNeedTap(true)
-        setStatus('点击画面开始播放')
+      if ((err as DOMException)?.name !== 'NotAllowedError') return
+      if (isWeChat) {
+        // 微信专属：JSBridge 回调里的 play() 被视为可信，多数机型可免点自动播
+        wxTrusted(() => {
+          v.muted = true
+          v.play().then(() => { needTapRef.current = false; setNeedTap(false) }).catch(blocked)
+        })
+      } else {
+        blocked()
       }
     })
   }, [videoRef])
@@ -157,7 +188,12 @@ export function useWhep(videoRef: RefObject<HTMLVideoElement>, room: string, web
       v.setAttribute('muted', '')
       v.setAttribute('playsinline', '')
       v.setAttribute('autoplay', '')
+      // 安卓微信 X5 内核：不加会被劫持成全屏原生播放器
+      v.setAttribute('webkit-playsinline', '')
+      v.setAttribute('x5-playsinline', '')
     }
+    // 微信：bridge 就绪即预热一次 play()（解锁元素），流到达后的自动播成功率更高
+    if (isWeChat) wxTrusted(() => { if (!playingRef.current) tryPlay() })
     const onPlaying = () => {
       playingRef.current = true
       needTapRef.current = false
