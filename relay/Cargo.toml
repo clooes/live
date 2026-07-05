@@ -12,8 +12,10 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
 anyhow = "1"
-# RTP 注入器（rtp_ingest）：UDP 收 ffmpeg 的裸 RTP 包装成 streamhub PacketData
+# RTP 注入器（rtp_ingest）：UDP 收 ffmpeg 的裸 RTP 包装成 streamhub PacketData；
+# socket2 用于放大接收缓冲（关键帧突发一簇包，默认缓冲有冲爆丢包风险）
 bytes = "1"
+socket2 = "0.5"
 
 # xiu 纯 Rust 媒体内核（RTMP 接收 + WHEP 输出 + 媒体路由）
 streamhub = "0.2.4"

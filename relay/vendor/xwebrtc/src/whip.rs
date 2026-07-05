@@ -14,7 +14,6 @@ use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::MediaEngine;
 use webrtc::api::APIBuilder;
 use webrtc::ice_transport::ice_connection_state::RTCIceConnectionState;
-use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::interceptor::registry::Registry;
 use webrtc::peer_connection::configuration::RTCConfiguration;
 use webrtc::peer_connection::peer_connection_state::RTCPeerConnectionState;
@@ -123,13 +122,9 @@ pub async fn handle_whip(
         .build();
 
     // Prepare the configuration
-    let config = RTCConfiguration {
-        ice_servers: vec![RTCIceServer {
-            urls: vec!["stun:stun.l.google.com:19302".to_owned()],
-            ..Default::default()
-        }],
-        ..Default::default()
-    };
+    // 不配 STUN：纯内网直连（且已限定 IPv4 host 候选），srflx 候选毫无用处；
+    // 离线局域网里等 stun.l.google.com 超时会拖慢 ICE gathering → answer 迟迟不返回，白等数秒。
+    let config = RTCConfiguration::default();
 
     // Create a new RTCPeerConnection
     let peer_connection = Arc::new(api.new_peer_connection(config).await?);

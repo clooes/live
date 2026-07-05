@@ -105,7 +105,7 @@ connected、8s 解码 217 帧 640×360 + 音频正常；连推两场无 `Exists`
 
 ✅ 已验证：走 RTMP 直录、跳过桥 WebRTC、ffmpeg.log 无 aresample/PPS、音频 AAC 直拷。
 
-## ⚠️ 已知问题（待修）：phantom RTMP 自转推 → 多录一个会话
+## phantom RTMP 自转推 → 多录一个会话（已修：监听层去抖）
 
 **现象**：单次 RTMP 推流，收尾时会**多冒出一个会话**（full.mp4 目录 >1）。
 
@@ -120,13 +120,12 @@ connected、8s 解码 217 帧 640×360 + 音频正常；连推两场无 `Exists`
 > streamhub/rtmp 在 hls 路径下内部起的；`set_hls_enabled(true)` 又是录制/桥拿 Publish 事件所必需，
 > 不能简单关掉）。
 
-**待实施的修复（二选一）**：
-1. **监听层去抖（推荐，改动小、不碰 vendor）**：`spawn_monitor` 里
-   - `Publish{Rtmp}` 若 `rtmp_active` 已 true → 忽略（已在录，去重）；
-   - 记 `UnPublish{Rtmp}` 时刻，其后 ~4-5s 内到来的 `Publish{Rtmp}` 视为 phantom/抖动 → 忽略。
-   代价：OBS 断线 5s 内快速重连会跳过一次重录（边缘情况，可接受）。
-2. **根治**：vendor `rtmp` 或 streamhub，禁掉自推到 localhost 的 relay，或让它不发 Publish 事件。
-   改动大、碰 vendor，暂不做。
+**已实施修复（2026-07-05，监听层去抖）**：原计划基于 `UnPublish{Rtmp}` 时刻，但实测
+streamhub **从不广播 UnPublish**，改用录制器自身的收尾时刻：`finalize_session` 写
+`RecStore.last_session_end_ms`，`spawn_monitor` 里距上场直录结束 **5s 内**到来的
+`Publish{Rtmp}` 视为 phantom 忽略（只跳过录制，桥/直播不受影响）。
+代价：OBS 断线 5s 内快速重连会跳过一次重录（边缘情况，可接受）。
+根治（vendor 禁掉 localhost 自转推）暂不做。
 
 ## 四、启动地址横幅（banner.rs）
 
@@ -142,4 +141,4 @@ connected、8s 解码 217 帧 640×360 + 音频正常；连推两场无 `Exists`
 | Windows 实机（此前 whip 路线因 DTLS 后端全挂，待新包复测） | ⏳ 待复测 |
 | RTMP 直录、音频 AAC 无损、无哧哧 | ✅ 通 |
 | SPS/PPS 修复（WHIP 直推录制路） | ✅ 通 |
-| phantom 自转推 → 多录一个会话 | ⚠️ 待修（见上，方案 1 去抖） |
+| phantom 自转推 → 多录一个会话 | ✅ 已修（监听层去抖，见上；正常两场 6s 间隔不误伤） |

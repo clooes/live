@@ -83,6 +83,10 @@ pub struct RecStore {
     pub session_stop: Option<oneshot::Sender<()>>,
     /// 录制列表（最新在前）。
     pub recordings: Vec<Recording>,
+    /// 上一场直录结束的墙钟（ms）。phantom 去抖用：rtmp crate 的 relay PushClient 会在真流
+    /// 停推的空档自转推成功一次，触发假 `Publish{Rtmp}` → 多录一个幽灵会话。结束后短窗口内
+    /// 到来的 RTMP 上线视为 phantom 忽略（代价：真流停后 5s 内快速重连会跳过一次重录）。
+    pub last_session_end_ms: u64,
 }
 
 pub type SharedRec = Arc<RwLock<RecStore>>;
@@ -300,6 +304,16 @@ pub fn spawn_monitor(
             match client_rx.recv().await {
                 Ok(BroadcastEvent::Publish { identifier }) => match identifier {
                     StreamIdentifier::Rtmp { app_name, stream_name } if stream_name == room => {
+                        // phantom 去抖：rtmp crate 的 relay PushClient 在真流停推的空档会自转推
+                        // 成功一次，触发假 Publish{Rtmp} → 幽灵录制会话。上一场直录刚结束的短
+                        // 窗口内到来的 RTMP 上线视为 phantom 忽略（真流 5s 内快速重连会跳过一次
+                        // 重录，属可接受边缘；直播不受影响——桥照常起）。
+                        let since_end = now_ms().saturating_sub(rec.read().await.last_session_end_ms);
+                        if since_end < 5_000 {
+                            log::info!("忽略疑似 phantom 的 RTMP 上线（距上场直录结束 {since_end}ms）\
+                                        app={app_name} stream={stream_name}");
+                            continue;
+                        }
                         log::info!("RTMP 直播流上线 app={app_name} stream={stream_name}（直录）");
                         rtmp_active = true;
                         on_publish_rtmp(&rec, &shutdown, &tasks, rtmp_port, app_name, stream_name).await;
@@ -793,6 +807,7 @@ async fn session_recorder(
 async fn finalize_session(rec: &SharedRec, session_id: &str, end_ms: u64) {
     let pending: Vec<String> = {
         let mut s = rec.write().await;
+        s.last_session_end_ms = end_ms; // phantom 去抖基准（见 spawn_monitor）
         if s.session.as_ref().map(|x| x.id == session_id).unwrap_or(false) {
             s.session = None;
             s.session_stop = None;

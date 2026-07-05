@@ -2419,6 +2419,7 @@ dependencies = [
  "rust-embed",
  "serde",
  "serde_json",
+ "socket2 0.5.10",
  "streamhub",
  "tokio",
  "tokio-stream",

@@ -44,8 +44,8 @@ impl RtpIngest {
     /// 发布一路 WebRTC 流并开始收 RTP：video/audio 各绑一个 127.0.0.1 随机 UDP 端口。
     /// RTCP 无需处理：ffmpeg 默认把 RTCP 发到 RTP 端口 +1，我们不绑它，自然丢弃。
     pub async fn start(hub: StreamHubEventSender, app: &str, stream: &str) -> anyhow::Result<Self> {
-        let video_sock = UdpSocket::bind("127.0.0.1:0").await?;
-        let audio_sock = UdpSocket::bind("127.0.0.1:0").await?;
+        let video_sock = bind_ingest_socket()?;
+        let audio_sock = bind_ingest_socket()?;
         let video_port = video_sock.local_addr()?.port();
         let audio_port = audio_sock.local_addr()?.port();
 
@@ -129,6 +129,24 @@ impl RtpIngest {
             log::warn!("RTP 注入流 unpublish 发送失败（hub 已关闭）");
         }
     }
+}
+
+/// 绑一个大接收缓冲的本机 UDP 收包口。关键帧是突发的一簇包（720p 关键帧可达几十 KB =
+/// 几十个包瞬间到达），系统默认缓冲（macOS 仅几十 KB）有被冲爆丢包的风险——丢的恰是
+/// 关键帧，表现为花屏/卡顿。旧 RTP 录制路的「关键帧突发丢包」就是这个坑。
+fn bind_ingest_socket() -> anyhow::Result<UdpSocket> {
+    let sock = socket2::Socket::new(
+        socket2::Domain::IPV4,
+        socket2::Type::DGRAM,
+        Some(socket2::Protocol::UDP),
+    )?;
+    // 尽力放大；系统上限（如 macOS kern.ipc.maxsockbuf、Linux rmem_max）内取最大，失败不致命
+    if let Err(e) = sock.set_recv_buffer_size(4 * 1024 * 1024) {
+        log::warn!("放大 RTP 注入接收缓冲失败（用系统默认）: {e}");
+    }
+    sock.bind(&std::net::SocketAddr::from(([127, 0, 0, 1], 0)).into())?;
+    sock.set_nonblocking(true)?;
+    Ok(UdpSocket::from_std(sock.into())?)
 }
 
 /// 收包循环：一个 UDP 数据报 = 一个 RTP 包，原样转发进 hub。
