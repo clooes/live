@@ -21,8 +21,9 @@ export function Viewer() {
   const [room, setRoom] = useState("");
   const [webrtcPort, setWebrtcPort] = useState(0);
   const [synced, setSynced] = useState(false);
-  // 断流/失败全自动重连（useWhep 内含重试链 + 出画面看门狗），页面不再放手动重连按钮
-  const { status, live } = useWhep(videoRef, room, webrtcPort);
+  // 断流/失败全自动重连（useWhep 内含重试链 + 出画面看门狗），页面不再放手动重连按钮；
+  // needTap = 自动播放被浏览器拦截（iOS 低电量模式等），浮层引导点一下（手势里 resume）
+  const { status, live, needTap, resume } = useWhep(videoRef, room, webrtcPort);
 
   // 全屏：优先全屏容器（连同状态浮层）；iPhone Safari 不支持元素全屏，回退 video 原生全屏
   function toggleFullscreen() {
@@ -70,7 +71,15 @@ export function Viewer() {
           className="player"
           onDoubleClick={toggleFullscreen}
         />
-        {!live && <div className="overlay">{status}</div>}
+        {!live &&
+          (needTap ? (
+            <div className="overlay tap" onClick={resume}>
+              <span className="tap-btn">▶</span>
+              <span>点击播放</span>
+            </div>
+          ) : (
+            <div className="overlay">{status}</div>
+          ))}
         {/* 仅全屏时显示（CSS :fullscreen 控制）：全屏后工具栏被盖住，需页面内退出途径 */}
         <button className="fs-exit" onClick={toggleFullscreen}>
           ✕ 退出全屏
